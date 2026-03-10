@@ -1,0 +1,56 @@
+version: "3.9"
+
+# =============================================================================
+# go-redis docker-compose
+#
+# Profiles:
+#   dev   - live source mount, uses 'go run' for fast iteration
+#   prod  - builds and runs the optimised multi-stage Docker image
+#
+# Usage:
+#   docker compose --profile dev  up        # start dev server
+#   docker compose --profile prod up --build # build + start prod server
+#   docker compose --profile dev  run app go test ./...  # run tests
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # dev: mounts source code and uses 'go run' directly.
+  # Changes to .go files are picked up by restarting this service.
+  # ---------------------------------------------------------------------------
+  app:
+    profiles: [dev]
+    image: golang:1.24-alpine
+    working_dir: /app
+    volumes:
+      # Mount the entire project into the container so edits on the host
+      # are immediately visible inside without a rebuild.
+      - .:/app
+      # Cache the Go module download cache between runs.
+      - go-mod-cache:/go/pkg/mod
+    ports:
+      - "6379:6379"
+    environment:
+      - GO_ENV=development
+    command: go run ./cmd/server
+    # Restart on exit so a code crash doesn't kill the compose session.
+    restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # prod: builds the multi-stage image and runs the static binary.
+  # ---------------------------------------------------------------------------
+  app-prod:
+    profiles: [prod]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    ports:
+      - "6379:6379"
+    environment:
+      - GO_ENV=production
+    restart: unless-stopped
+
+# Named volume for the Go module cache — persists across container restarts.
+volumes:
+  go-mod-cache:

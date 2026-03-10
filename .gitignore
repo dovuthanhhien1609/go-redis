@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Go build output
+/go-redis
+/server
+
+# Test binary
+*.test
+
+# AOF data file (generated at runtime)
+*.aof

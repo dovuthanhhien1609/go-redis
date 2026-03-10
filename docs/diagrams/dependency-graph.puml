@@ -1,0 +1,82 @@
+@startuml dependency-graph
+title go-redis — Package Dependency Graph
+
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam packageStyle rectangle
+
+skinparam component {
+    BackgroundColor #DDEEFF
+    BorderColor #336699
+    FontColor #111111
+}
+
+skinparam package {
+    BackgroundColor #F0F4FF
+    BorderColor #336699
+}
+
+skinparam arrow {
+    Color #336699
+    FontColor #555555
+    FontSize 10
+}
+
+note as N
+  Arrow direction = import dependency
+  Lower layers never import upper layers
+end note
+
+package "cmd/server" {
+    component [main] as MAIN
+}
+
+package "internal/server" {
+    component [server\nhandler] as SERVER
+}
+
+package "internal/commands" {
+    component [router\nping · string\nmeta] as COMMANDS
+}
+
+package "internal/persistence" {
+    component [aof\nreplay] as PERSISTENCE
+}
+
+package "internal/protocol" {
+    component [parser\nserializer\ntypes] as PROTOCOL
+}
+
+package "internal/storage" {
+    component [store\nmemory] as STORAGE
+}
+
+package "internal/config" {
+    component [config] as CONFIG
+}
+
+package "internal/logger" {
+    component [logger] as LOGGER
+}
+
+MAIN        --> SERVER
+MAIN        --> COMMANDS
+MAIN        --> STORAGE
+MAIN        --> PERSISTENCE
+MAIN        --> CONFIG
+MAIN        --> LOGGER
+
+SERVER      --> COMMANDS
+SERVER      --> PROTOCOL
+SERVER      --> CONFIG
+SERVER      --> LOGGER
+
+COMMANDS    --> STORAGE
+COMMANDS    --> PROTOCOL
+
+PERSISTENCE --> STORAGE
+PERSISTENCE --> PROTOCOL
+PERSISTENCE --> LOGGER
+
+@enduml

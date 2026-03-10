@@ -1,0 +1,46 @@
+@startuml graceful-shutdown
+title Graceful Shutdown Sequence
+
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+
+skinparam participant {
+    BackgroundColor #DDEEFF
+    BorderColor #336699
+}
+
+participant "OS Signal\n(SIGTERM/SIGINT)" as SIG
+participant "main()\nsignal.NotifyContext" as MAIN
+participant "Serve()\naccept loop" as SERVE
+participant "listener\nnet.Listener" as LN
+participant "closeAllConns()" as CLOSE
+participant "Handler goroutines\n(active clients)" as HANDLERS
+participant "wg.Wait()" as WG
+
+SIG -> MAIN : signal received
+MAIN -> MAIN : ctx cancelled\n(stop() called)
+
+MAIN -> LN : ln.Close()
+LN --> SERVE : Accept() returns\nnet.ErrClosed
+
+SERVE -> CLOSE : closeAllConns()
+CLOSE -> HANDLERS : conn.Close()\n(all tracked connections)
+
+HANDLERS -> HANDLERS : conn.Read() → io.EOF\nserve() returns\nwg.Done()
+
+SERVE -> WG : wg.Wait()
+WG --> SERVE : all handlers done
+SERVE --> MAIN : Serve() returns nil
+
+MAIN -> MAIN : process exits cleanly
+
+note over HANDLERS
+  In-flight commands complete
+  before conn.Close() unblocks
+  the Read() call — no command
+  is half-executed
+end note
+
+@enduml

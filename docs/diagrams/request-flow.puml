@@ -1,0 +1,95 @@
+@startuml request-flow
+title SET hello world — Full Request Lifecycle
+
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+
+skinparam participant {
+    BackgroundColor #DDEEFF
+    BorderColor #336699
+    FontColor #111111
+}
+
+skinparam actor {
+    BackgroundColor #FFFFFF
+    BorderColor #336699
+}
+
+skinparam note {
+    BackgroundColor #FFFDE7
+    BorderColor #F9A825
+}
+
+actor       "redis-cli"                             as CLIENT
+participant "TCP Server\n<size:10>server.go</size>" as TCP
+participant "Connection Handler\n<size:10>handler.go</size>" as HANDLER
+participant "RESP Parser\n<size:10>parser.go</size>" as PARSER
+participant "Command Router\n<size:10>router.go</size>" as ROUTER
+participant "handleSet\n<size:10>string.go</size>"  as CMD
+participant "MemoryStore\n<size:10>memory.go</size>" as STORE
+participant "AOF Writer\n<size:10>aof.go</size>"    as AOF
+participant "RESP Serializer\n<size:10>serializer.go</size>" as SERIAL
+
+== Client sends command ==
+
+CLIENT -> TCP : TCP segment\n<size:10>*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n</size>
+
+TCP -> HANDLER : net.Conn\n<size:10>(goroutine spawned)</size>
+
+== Parse ==
+
+HANDLER -> PARSER : ReadCommand()
+note right of PARSER
+  ReadByte() → '*' (Array)
+  readLine() → "3"
+  loop 3×:
+    ReadByte() → '$'
+    readLine() → length
+    ReadFull() → data
+    consumeCRLF()
+end note
+PARSER --> HANDLER : []string{"SET", "hello", "world"}
+
+== Dispatch ==
+
+HANDLER -> ROUTER : Dispatch(["SET","hello","world"])
+ROUTER -> ROUTER : ToUpper → "SET"\nhandlers["SET"] → handleSet
+
+== Execute ==
+
+ROUTER -> CMD : handleSet(args, store)
+CMD -> STORE : Set("hello", "world")
+note right of STORE
+  mu.Lock()
+  data["hello"] = "world"
+  mu.Unlock()
+end note
+STORE --> CMD : (done)
+CMD --> ROUTER : SimpleString("OK")
+
+== Persist ==
+
+ROUTER -> AOF : Append(["SET","hello","world"])
+note right of AOF
+  mu.Lock()
+  bufWriter.WriteString(RESP)
+  bufWriter.Flush() → OS page cache
+  mu.Unlock()
+  (fsync via syncLoop every 1s)
+end note
+AOF --> ROUTER : (done)
+
+== Respond ==
+
+ROUTER --> HANDLER : Response{SimpleString, "OK"}
+HANDLER -> SERIAL : Serialize(response)
+SERIAL --> HANDLER : "+OK\r\n"
+HANDLER -> CLIENT : TCP segment: "+OK\r\n"
+
+== Client displays ==
+
+CLIENT -> CLIENT : displays: OK
+
+@enduml

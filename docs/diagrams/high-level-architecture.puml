@@ -1,0 +1,77 @@
+@startuml high-level-architecture
+title go-redis — High-Level Architecture
+
+skinparam backgroundColor #FAFAFA
+skinparam componentStyle rectangle
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+
+skinparam component {
+    BackgroundColor #DDEEFF
+    BorderColor #336699
+    FontColor #111111
+}
+
+skinparam package {
+    BackgroundColor #F5F5F5
+    BorderColor #AAAAAA
+}
+
+skinparam arrow {
+    Color #336699
+    FontColor #444444
+    FontSize 11
+}
+
+package "go-redis server" {
+
+    package "Network Layer" {
+        component "TCP Server\n<size:10>server.go</size>" as TCP
+        component "Connection Handler\n<size:10>handler.go\n(goroutine per client)</size>" as CONN
+    }
+
+    package "Protocol Layer" {
+        component "RESP Parser\n<size:10>parser.go</size>" as PARSER
+        component "RESP Serializer\n<size:10>serializer.go</size>" as SERIAL
+    }
+
+    package "Command Layer" {
+        component "Command Router\n<size:10>router.go\nPING · SET · GET · DEL</size>" as ROUTER
+    }
+
+    package "Storage Layer" {
+        component "In-Memory Store\n<size:10>memory.go\nmap[string]string + RWMutex</size>" as STORE
+    }
+
+    package "Persistence Layer" {
+        component "AOF Writer\n<size:10>aof.go\nappendonly.aof</size>" as AOF
+    }
+
+    package "Infrastructure" {
+        component "Config\n<size:10>config.go</size>" as CONFIG
+        component "Logger\n<size:10>logger.go\n(slog, leveled)</size>" as LOGGER
+    }
+}
+
+TCP     -right-> CONN    : accept()\nnet.Conn
+CONN    -right-> PARSER  : raw bytes
+PARSER  -right-> ROUTER  : []string\ncommand
+
+ROUTER  -down->  STORE   : Set / Get / Del
+ROUTER  -right-> AOF     : Append\n(mutating cmds)
+
+STORE   -up->    ROUTER  : result
+ROUTER  -up->    SERIAL  : Response
+SERIAL  -left->  CONN    : RESP bytes
+CONN    -left->  TCP     : conn.Write
+
+CONFIG  .up.>    TCP     : config
+CONFIG  .up.>    ROUTER  : config
+
+LOGGER  .right.> TCP     : logs
+LOGGER  .right.> CONN    : logs
+LOGGER  .right.> ROUTER  : logs
+LOGGER  .right.> STORE   : logs
+LOGGER  .right.> AOF     : logs
+
+@enduml

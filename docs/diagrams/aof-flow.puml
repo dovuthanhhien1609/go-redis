@@ -1,0 +1,73 @@
+@startuml aof-flow
+title AOF — Write Path and Startup Replay
+
+skinparam backgroundColor #FAFAFA
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 12
+skinparam activityArrowThickness 1.5
+
+skinparam activity {
+    BackgroundColor #DDEEFF
+    BorderColor #336699
+    FontColor #111111
+    DiamondBackgroundColor #FFF8E1
+    DiamondBorderColor #F9A825
+}
+
+skinparam note {
+    BackgroundColor #FFFDE7
+    BorderColor #F9A825
+}
+
+|Command Path|
+start
+:Router.Dispatch(args);
+:Execute command against Store;
+if (command mutating?\nSET / DEL) then (yes)
+    if (response is not Error?) then (yes)
+        :AOF.Append(args);
+        |AOF Writer|
+        :Serialize args\nas RESP array;
+        :mu.Lock();
+        :bufWriter.WriteString();
+        :bufWriter.Flush()\n→ OS page cache;
+        :mu.Unlock();
+        if (SyncPolicy == always?) then (yes)
+            :file.Sync()\n→ physical disk;
+        else (no / everysec)
+            note right
+              syncLoop goroutine
+              calls file.Sync()
+              once per second
+            end note
+        endif
+        |Command Path|
+    else (no - error response)
+        note right
+          Failed commands
+          are never logged
+        end note
+    endif
+else (no - read-only)
+endif
+:Return Response to client;
+stop
+
+|Startup Replay|
+start
+:persistence.Replay(path, store);
+:store.Flush() — clean slate;
+:Open AOF file for reading;
+while (parser.ReadCommand() != EOF) is (command read)
+    if (command == "SET") then (yes)
+        :store.Set(key, value);
+    else (DEL)
+        :store.Del(keys...);
+    endif
+endwhile (EOF)
+:Log "replay complete"\ncommands=N, keys=M;
+:persistence.Open(path, policy)\n→ open for appending;
+:server.Run(ctx)\n→ start accepting clients;
+stop
+
+@enduml

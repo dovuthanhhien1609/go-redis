@@ -118,18 +118,37 @@ Step-by-step design and implementation notes live in [`docs/`](docs/).
 
 ## Architecture
 
-```
-Client
-  │  RESP request
-  ▼
-TCP Server ──► Connection Handler
-                    │               │               │
-                    ▼               ▼               ▼
-               RESP Parser    Command Router   RESP Serializer
-                                   │
-                          ┌────────┴────────┐
-                          ▼                 ▼
-                      MemoryStore       AOF Writer
+```mermaid
+flowchart LR
+    CLIENT(["redis-cli"])
+
+    subgraph NET["Network Layer"]
+        TCP["TCP Server\nserver.go"]
+        CONN["Connection Handler\nhandler.go"]
+    end
+
+    subgraph PROTO["Protocol Layer"]
+        PARSER["RESP Parser\nparser.go"]
+        SERIAL["RESP Serializer\nserializer.go"]
+    end
+
+    subgraph CMD["Command Layer"]
+        ROUTER["Command Router\nrouter.go"]
+    end
+
+    subgraph DATA["Data & Persistence"]
+        STORE["MemoryStore\nmemory.go"]
+        AOF["AOF Writer\naof.go"]
+    end
+
+    CLIENT -->|"RESP request"| TCP
+    TCP --> CONN
+    CONN --> PARSER
+    CONN --> ROUTER
+    CONN --> SERIAL
+    ROUTER --> STORE
+    ROUTER --> AOF
+    SERIAL -->|"RESP response"| CLIENT
 ```
 
 See [02-architecture.md](docs/02-architecture.md) for the full layered diagram and dependency graph.

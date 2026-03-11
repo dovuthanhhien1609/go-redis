@@ -1,11 +1,11 @@
 # go-redis
 
-A Redis-compatible server written in Go. Implements the RESP v2 wire protocol,
-string and hash data types, key expiration, Pub/Sub with pattern matching, and
-Append-Only File persistence.
+A Redis-compatible server written in Go.
 
-Built as a focused, production-quality learning project — not a full Redis
-replacement, but a correct and well-tested subset of it.
+This project was built as a learning project to better understand the
+internal architecture of Redis and in-memory data stores. It implements a
+subset of Redis features including the RESP v2 protocol, basic data types,
+key expiration, Pub/Sub messaging, and AOF persistence.
 
 ---
 

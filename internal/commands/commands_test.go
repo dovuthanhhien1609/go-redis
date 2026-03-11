@@ -2,6 +2,7 @@ package commands
 
 import (
 	"testing"
+	"time"
 
 	"github.com/hiendvt/go-redis/internal/protocol"
 	"github.com/hiendvt/go-redis/internal/storage"
@@ -9,51 +10,286 @@ import (
 
 // ── Mock store ────────────────────────────────────────────────────────────────
 
-// mockStore is a simple in-memory map that satisfies storage.Store.
-// It is NOT thread-safe — that is intentional; command handler tests are
-// single-threaded and we want test failures to be deterministic.
+// mockStore is a simple in-memory store that satisfies storage.Store.
+// NOT thread-safe — intentional; command handler tests are single-threaded.
 type mockStore struct {
-	data map[string]string
+	data    map[string]string
+	hashes  map[string]map[string]string
+	expires map[string]time.Time // zero = no expiry
 }
 
 func newMock(pairs ...string) *mockStore {
-	m := &mockStore{data: make(map[string]string)}
+	m := &mockStore{
+		data:    make(map[string]string),
+		hashes:  make(map[string]map[string]string),
+		expires: make(map[string]time.Time),
+	}
 	for i := 0; i+1 < len(pairs); i += 2 {
 		m.data[pairs[i]] = pairs[i+1]
 	}
 	return m
 }
 
-func (m *mockStore) Set(key, value string)         { m.data[key] = value }
-func (m *mockStore) Get(key string) (string, bool) { v, ok := m.data[key]; return v, ok }
+func (m *mockStore) isExpired(key string) bool {
+	exp, ok := m.expires[key]
+	return ok && !exp.IsZero() && time.Now().After(exp)
+}
+
+func (m *mockStore) Set(key, value string) {
+	m.data[key] = value
+	delete(m.expires, key)
+	delete(m.hashes, key)
+}
+
+func (m *mockStore) SetWithTTL(key, value string, ttl time.Duration) {
+	m.data[key] = value
+	m.expires[key] = time.Now().Add(ttl)
+	delete(m.hashes, key)
+}
+
+func (m *mockStore) Get(key string) (string, bool) {
+	if m.isExpired(key) {
+		return "", false
+	}
+	v, ok := m.data[key]
+	return v, ok
+}
+
 func (m *mockStore) Del(keys ...string) int {
 	n := 0
 	for _, k := range keys {
-		if _, ok := m.data[k]; ok {
+		if _, ok := m.data[k]; ok && !m.isExpired(k) {
 			delete(m.data, k)
+			delete(m.expires, k)
+			n++
+			continue
+		}
+		if _, ok := m.hashes[k]; ok {
+			delete(m.hashes, k)
+			delete(m.expires, k)
 			n++
 		}
 	}
 	return n
 }
+
 func (m *mockStore) Exists(keys ...string) int {
 	n := 0
 	for _, k := range keys {
-		if _, ok := m.data[k]; ok {
+		if _, ok := m.data[k]; ok && !m.isExpired(k) {
+			n++
+			continue
+		}
+		if _, ok := m.hashes[k]; ok && !m.isExpired(k) {
 			n++
 		}
 	}
 	return n
 }
+
 func (m *mockStore) Keys(_ string) []string {
-	keys := make([]string, 0, len(m.data))
+	keys := make([]string, 0, len(m.data)+len(m.hashes))
 	for k := range m.data {
-		keys = append(keys, k)
+		if !m.isExpired(k) {
+			keys = append(keys, k)
+		}
+	}
+	for k := range m.hashes {
+		if !m.isExpired(k) {
+			keys = append(keys, k)
+		}
 	}
 	return keys
 }
-func (m *mockStore) Len() int { return len(m.data) }
-func (m *mockStore) Flush()   { m.data = make(map[string]string) }
+
+func (m *mockStore) Len() int {
+	n := 0
+	for k := range m.data {
+		if !m.isExpired(k) {
+			n++
+		}
+	}
+	for k := range m.hashes {
+		if !m.isExpired(k) {
+			n++
+		}
+	}
+	return n
+}
+
+func (m *mockStore) Flush() {
+	m.data = make(map[string]string)
+	m.hashes = make(map[string]map[string]string)
+	m.expires = make(map[string]time.Time)
+}
+
+func (m *mockStore) Expire(key string, ttl time.Duration) bool {
+	if _, ok := m.data[key]; ok && !m.isExpired(key) {
+		m.expires[key] = time.Now().Add(ttl)
+		return true
+	}
+	if _, ok := m.hashes[key]; ok && !m.isExpired(key) {
+		m.expires[key] = time.Now().Add(ttl)
+		return true
+	}
+	return false
+}
+
+func (m *mockStore) TTL(key string) time.Duration {
+	if _, ok := m.data[key]; ok {
+		if m.isExpired(key) {
+			return -2 * time.Second
+		}
+		exp, hasExp := m.expires[key]
+		if !hasExp || exp.IsZero() {
+			return -1 * time.Second
+		}
+		return time.Until(exp)
+	}
+	return -2 * time.Second
+}
+
+func (m *mockStore) Persist(key string) bool {
+	if exp, ok := m.expires[key]; ok && !exp.IsZero() {
+		delete(m.expires, key)
+		return true
+	}
+	return false
+}
+
+func (m *mockStore) Rename(src, dst string) bool {
+	if val, ok := m.data[src]; ok && !m.isExpired(src) {
+		m.data[dst] = val
+		delete(m.data, src)
+		delete(m.expires, src)
+		return true
+	}
+	if h, ok := m.hashes[src]; ok && !m.isExpired(src) {
+		m.hashes[dst] = h
+		delete(m.hashes, src)
+		delete(m.expires, src)
+		return true
+	}
+	return false
+}
+
+func (m *mockStore) HSet(key string, fields map[string]string) int {
+	delete(m.data, key)
+	if m.hashes[key] == nil {
+		m.hashes[key] = make(map[string]string)
+	}
+	added := 0
+	for f, v := range fields {
+		if _, exists := m.hashes[key][f]; !exists {
+			added++
+		}
+		m.hashes[key][f] = v
+	}
+	return added
+}
+
+func (m *mockStore) HGet(key, field string) (string, bool) {
+	if m.isExpired(key) {
+		return "", false
+	}
+	h, ok := m.hashes[key]
+	if !ok {
+		return "", false
+	}
+	v, found := h[field]
+	return v, found
+}
+
+func (m *mockStore) HDel(key string, fields ...string) int {
+	if m.isExpired(key) {
+		return 0
+	}
+	h, ok := m.hashes[key]
+	if !ok {
+		return 0
+	}
+	n := 0
+	for _, f := range fields {
+		if _, exists := h[f]; exists {
+			delete(h, f)
+			n++
+		}
+	}
+	return n
+}
+
+func (m *mockStore) HGetAll(key string) map[string]string {
+	if m.isExpired(key) {
+		return nil
+	}
+	h, ok := m.hashes[key]
+	if !ok {
+		return nil
+	}
+	result := make(map[string]string, len(h))
+	for f, v := range h {
+		result[f] = v
+	}
+	return result
+}
+
+func (m *mockStore) HLen(key string) int {
+	if m.isExpired(key) {
+		return 0
+	}
+	return len(m.hashes[key])
+}
+
+func (m *mockStore) HExists(key, field string) bool {
+	if m.isExpired(key) {
+		return false
+	}
+	_, ok := m.hashes[key][field]
+	return ok
+}
+
+func (m *mockStore) HKeys(key string) []string {
+	if m.isExpired(key) {
+		return nil
+	}
+	h := m.hashes[key]
+	if h == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(h))
+	for f := range h {
+		keys = append(keys, f)
+	}
+	return keys
+}
+
+func (m *mockStore) HVals(key string) []string {
+	if m.isExpired(key) {
+		return nil
+	}
+	h := m.hashes[key]
+	if h == nil {
+		return nil
+	}
+	vals := make([]string, 0, len(h))
+	for _, v := range h {
+		vals = append(vals, v)
+	}
+	return vals
+}
+
+func (m *mockStore) Type(key string) string {
+	if m.isExpired(key) {
+		return "none"
+	}
+	if _, ok := m.data[key]; ok {
+		return "string"
+	}
+	if _, ok := m.hashes[key]; ok {
+		return "hash"
+	}
+	return "none"
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -134,7 +370,6 @@ func TestSet_OK(t *testing.T) {
 	store := newMock()
 	r := handleSet([]string{"SET", "key", "value"}, store)
 	assertSimpleString(t, r, "OK")
-	// Verify the value was actually stored.
 	if v, ok := store.data["key"]; !ok || v != "value" {
 		t.Errorf("store: got %q, want %q", v, "value")
 	}
@@ -204,7 +439,6 @@ func TestDel_MissingKey(t *testing.T) {
 func TestDel_MultipleKeys(t *testing.T) {
 	store := newMock("a", "1", "b", "2", "c", "3")
 	r := handleDel([]string{"DEL", "a", "b", "nope"}, store)
-	// "a" and "b" exist; "nope" does not → count = 2
 	assertInteger(t, r, 2)
 	if _, ok := store.data["a"]; ok {
 		t.Error("key 'a' should have been deleted")
@@ -229,7 +463,6 @@ func TestExists_SingleMissing(t *testing.T) {
 }
 
 func TestExists_DuplicateKeyCounts(t *testing.T) {
-	// Redis counts a repeated key each time it appears in the argument list.
 	r := handleExists([]string{"EXISTS", "k", "k", "k"}, newMock("k", "v"))
 	assertInteger(t, r, 3)
 }
@@ -261,6 +494,240 @@ func TestKeys_Empty(t *testing.T) {
 func TestKeys_NoArgs(t *testing.T) {
 	r := handleKeys([]string{"KEYS"}, newMock())
 	assertError(t, r)
+}
+
+// ── SETNX tests ───────────────────────────────────────────────────────────────
+
+func TestSetNX_NewKey(t *testing.T) {
+	store := newMock()
+	r := handleSetNX([]string{"SETNX", "k", "v"}, store)
+	assertInteger(t, r, 1)
+	if store.data["k"] != "v" {
+		t.Error("SETNX should have stored the value")
+	}
+}
+
+func TestSetNX_ExistingKey(t *testing.T) {
+	store := newMock("k", "old")
+	r := handleSetNX([]string{"SETNX", "k", "new"}, store)
+	assertInteger(t, r, 0)
+	if store.data["k"] != "old" {
+		t.Error("SETNX should not overwrite existing key")
+	}
+}
+
+// ── INCR / DECR tests ─────────────────────────────────────────────────────────
+
+func TestIncr_NewKey(t *testing.T) {
+	r := handleIncr([]string{"INCR", "counter"}, newMock())
+	assertInteger(t, r, 1)
+}
+
+func TestIncr_Existing(t *testing.T) {
+	r := handleIncr([]string{"INCR", "counter"}, newMock("counter", "5"))
+	assertInteger(t, r, 6)
+}
+
+func TestIncr_NotInteger(t *testing.T) {
+	r := handleIncr([]string{"INCR", "k"}, newMock("k", "notanint"))
+	assertError(t, r)
+}
+
+func TestIncrBy(t *testing.T) {
+	r := handleIncrBy([]string{"INCRBY", "k", "10"}, newMock("k", "5"))
+	assertInteger(t, r, 15)
+}
+
+func TestDecr(t *testing.T) {
+	r := handleDecr([]string{"DECR", "k"}, newMock("k", "3"))
+	assertInteger(t, r, 2)
+}
+
+func TestDecrBy(t *testing.T) {
+	r := handleDecrBy([]string{"DECRBY", "k", "3"}, newMock("k", "10"))
+	assertInteger(t, r, 7)
+}
+
+// ── MSET / MGET tests ─────────────────────────────────────────────────────────
+
+func TestMSet(t *testing.T) {
+	store := newMock()
+	r := handleMSet([]string{"MSET", "a", "1", "b", "2"}, store)
+	assertSimpleString(t, r, "OK")
+	if store.data["a"] != "1" || store.data["b"] != "2" {
+		t.Error("MSET did not store all values")
+	}
+}
+
+func TestMGet(t *testing.T) {
+	store := newMock("a", "1", "b", "2")
+	r := handleMGet([]string{"MGET", "a", "b", "missing"}, store)
+	assertArrayLen(t, r, 3)
+	assertBulkString(t, r.Array[0], "1")
+	assertBulkString(t, r.Array[1], "2")
+	assertNullBulkString(t, r.Array[2])
+}
+
+// ── GETSET / GETDEL tests ─────────────────────────────────────────────────────
+
+func TestGetSet_Existing(t *testing.T) {
+	store := newMock("k", "old")
+	r := handleGetSet([]string{"GETSET", "k", "new"}, store)
+	assertBulkString(t, r, "old")
+	if store.data["k"] != "new" {
+		t.Error("GETSET should update the value")
+	}
+}
+
+func TestGetSet_Missing(t *testing.T) {
+	store := newMock()
+	r := handleGetSet([]string{"GETSET", "k", "new"}, store)
+	assertNullBulkString(t, r)
+	if store.data["k"] != "new" {
+		t.Error("GETSET should set a new key")
+	}
+}
+
+func TestGetDel_Existing(t *testing.T) {
+	store := newMock("k", "v")
+	r := handleGetDel([]string{"GETDEL", "k"}, store)
+	assertBulkString(t, r, "v")
+	if _, ok := store.data["k"]; ok {
+		t.Error("GETDEL should delete the key")
+	}
+}
+
+func TestGetDel_Missing(t *testing.T) {
+	r := handleGetDel([]string{"GETDEL", "k"}, newMock())
+	assertNullBulkString(t, r)
+}
+
+// ── APPEND / STRLEN tests ─────────────────────────────────────────────────────
+
+func TestAppend(t *testing.T) {
+	store := newMock("k", "hello")
+	r := handleAppend([]string{"APPEND", "k", " world"}, store)
+	assertInteger(t, r, 11)
+	if store.data["k"] != "hello world" {
+		t.Error("APPEND did not concatenate correctly")
+	}
+}
+
+func TestStrLen(t *testing.T) {
+	r := handleStrLen([]string{"STRLEN", "k"}, newMock("k", "hello"))
+	assertInteger(t, r, 5)
+}
+
+func TestStrLen_Missing(t *testing.T) {
+	r := handleStrLen([]string{"STRLEN", "k"}, newMock())
+	assertInteger(t, r, 0)
+}
+
+// ── EXPIRE / TTL tests ────────────────────────────────────────────────────────
+
+func TestExpire_SetAndTTL(t *testing.T) {
+	store := newMock("k", "v")
+	r := handleExpire([]string{"EXPIRE", "k", "100"}, store)
+	assertInteger(t, r, 1)
+
+	ttl := handleTTL([]string{"TTL", "k"}, store)
+	if ttl.Integer <= 0 || ttl.Integer > 100 {
+		t.Errorf("TTL should be 1–100, got %d", ttl.Integer)
+	}
+}
+
+func TestTTL_NoExpiry(t *testing.T) {
+	r := handleTTL([]string{"TTL", "k"}, newMock("k", "v"))
+	assertInteger(t, r, -1)
+}
+
+func TestTTL_Missing(t *testing.T) {
+	r := handleTTL([]string{"TTL", "missing"}, newMock())
+	assertInteger(t, r, -2)
+}
+
+func TestPersist(t *testing.T) {
+	store := newMock("k", "v")
+	handleExpire([]string{"EXPIRE", "k", "100"}, store)
+	r := handlePersist([]string{"PERSIST", "k"}, store)
+	assertInteger(t, r, 1)
+
+	ttl := handleTTL([]string{"TTL", "k"}, store)
+	assertInteger(t, ttl, -1)
+}
+
+// ── HSET / HGET / HGETALL tests ───────────────────────────────────────────────
+
+func TestHSet_And_HGet(t *testing.T) {
+	store := newMock()
+	r := handleHSet([]string{"HSET", "user:1", "name", "alice", "age", "30"}, store)
+	assertInteger(t, r, 2) // 2 new fields added
+
+	r = handleHGet([]string{"HGET", "user:1", "name"}, store)
+	assertBulkString(t, r, "alice")
+}
+
+func TestHGet_Missing(t *testing.T) {
+	r := handleHGet([]string{"HGET", "nokey", "field"}, newMock())
+	assertNullBulkString(t, r)
+}
+
+func TestHGetAll(t *testing.T) {
+	store := newMock()
+	handleHSet([]string{"HSET", "h", "f1", "v1", "f2", "v2"}, store)
+	r := handleHGetAll([]string{"HGETALL", "h"}, store)
+	assertArrayLen(t, r, 4) // 2 fields × 2 (key+value)
+}
+
+func TestHDel(t *testing.T) {
+	store := newMock()
+	handleHSet([]string{"HSET", "h", "f1", "v1", "f2", "v2"}, store)
+	r := handleHDel([]string{"HDEL", "h", "f1"}, store)
+	assertInteger(t, r, 1)
+	r = handleHGet([]string{"HGET", "h", "f1"}, store)
+	assertNullBulkString(t, r)
+}
+
+func TestHLen(t *testing.T) {
+	store := newMock()
+	handleHSet([]string{"HSET", "h", "a", "1", "b", "2"}, store)
+	r := handleHLen([]string{"HLEN", "h"}, store)
+	assertInteger(t, r, 2)
+}
+
+func TestHExists(t *testing.T) {
+	store := newMock()
+	handleHSet([]string{"HSET", "h", "f", "v"}, store)
+	r := handleHExists([]string{"HEXISTS", "h", "f"}, store)
+	assertInteger(t, r, 1)
+	r = handleHExists([]string{"HEXISTS", "h", "missing"}, store)
+	assertInteger(t, r, 0)
+}
+
+func TestHIncrBy(t *testing.T) {
+	store := newMock()
+	handleHSet([]string{"HSET", "h", "score", "10"}, store)
+	r := handleHIncrBy([]string{"HINCRBY", "h", "score", "5"}, store)
+	assertInteger(t, r, 15)
+}
+
+// ── TYPE tests ────────────────────────────────────────────────────────────────
+
+func TestType_String(t *testing.T) {
+	r := handleType([]string{"TYPE", "k"}, newMock("k", "v"))
+	assertSimpleString(t, r, "string")
+}
+
+func TestType_Hash(t *testing.T) {
+	store := newMock()
+	handleHSet([]string{"HSET", "h", "f", "v"}, store)
+	r := handleType([]string{"TYPE", "h"}, store)
+	assertSimpleString(t, r, "hash")
+}
+
+func TestType_None(t *testing.T) {
+	r := handleType([]string{"TYPE", "missing"}, newMock())
+	assertSimpleString(t, r, "none")
 }
 
 // ── Router dispatch tests ─────────────────────────────────────────────────────
@@ -300,6 +767,12 @@ func TestRouter_Dispatch_SetThenGet(t *testing.T) {
 func TestRouter_Dispatch_COMMAND(t *testing.T) {
 	router := NewRouter(storage.NewMemoryStore(), nil, nil)
 	r := router.Dispatch([]string{"COMMAND"})
-	// Should return an array (possibly empty) — not an error.
 	assertArrayLen(t, r, 0)
+}
+
+func TestRouter_Dispatch_IncrRoundtrip(t *testing.T) {
+	router := NewRouter(storage.NewMemoryStore(), nil, nil)
+	router.Dispatch([]string{"SET", "x", "10"})
+	r := router.Dispatch([]string{"INCR", "x"})
+	assertInteger(t, r, 11)
 }

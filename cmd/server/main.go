@@ -49,6 +49,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// 8. Start the background key-expiry cleanup goroutine.
+	// It exits automatically when ctx is cancelled (on shutdown).
+	store.StartCleanup(ctx)
+
 	if err := srv.Run(ctx); err != nil {
 		log.Error("server error", "err", err)
 		os.Exit(1)

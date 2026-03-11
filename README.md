@@ -1,154 +1,221 @@
 # go-redis
 
-An educational Redis clone built in Go to deeply understand systems programming,
-networking, storage engines, and database architecture.
+A Redis-compatible server written in Go. Implements the RESP v2 wire protocol,
+string and hash data types, key expiration, Pub/Sub with pattern matching, and
+Append-Only File persistence.
 
-> This is not a production Redis replacement. It is a well-architected, step-by-step
-> implementation of the core Redis subsystems for learning purposes.
+Built as a focused, production-quality learning project — not a full Redis
+replacement, but a correct and well-tested subset of it.
 
 ---
 
-## Features
+## Key Features
 
-- TCP server on port 6379
-- RESP v2 protocol — full parser and serializer
-- Commands: `PING`, `SET`, `GET`, `DEL`, `EXISTS`, `KEYS`
-- Thread-safe in-memory key-value store (`sync.RWMutex`)
-- Append-Only File (AOF) persistence with startup replay
-- Graceful shutdown (SIGTERM / SIGINT)
+- **RESP v2** — binary-safe incremental parser and serializer
+- **Two data types** — strings and hashes, sharing a single key namespace
+- **Key expiration** — lazy deletion on reads + 1-second background sweep; TTLs survive restarts via absolute `PEXPIREAT` timestamps in the AOF
+- **Pub/Sub** — exact-channel (`SUBSCRIBE`) and glob-pattern (`PSUBSCRIBE`) subscriptions; non-blocking fan-out with slow-consumer protection
+- **AOF persistence** — three fsync policies (`always`, `everysec`, `no`); startup replay reconstructs in-memory state
+- **Graceful shutdown** — SIGTERM/SIGINT drains connections before exit
+- **Race-safe** — `sync.RWMutex` throughout; 175 tests pass with `-race`
 
-## Planned Extensions
+---
 
-- Key expiration (`TTL` / `EXPIRE`)
-- RDB snapshot persistence
-- Pub/Sub
-- Replication (leader/follower)
-- Sharded storage
+## Supported Commands
+
+| Category | Commands |
+|----------|----------|
+| Connection | `PING`, `SELECT` |
+| Strings | `SET`, `GET`, `DEL`, `EXISTS`, `KEYS`, `MSET`, `MGET`, `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `GETDEL`, `APPEND`, `STRLEN` |
+| Counters | `INCR`, `INCRBY`, `DECR`, `DECRBY` |
+| Expiry | `EXPIRE`, `PEXPIRE`, `TTL`, `PTTL`, `PERSIST` |
+| Hashes | `HSET`, `HMSET`, `HGET`, `HDEL`, `HGETALL`, `HMGET`, `HLEN`, `HEXISTS`, `HKEYS`, `HVALS`, `HINCRBY` |
+| Pub/Sub | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE` |
+| Admin | `INFO`, `DBSIZE`, `TYPE`, `RENAME`, `FLUSHDB`, `FLUSHALL`, `COMMAND` |
 
 ---
 
 ## Quick Start
 
-### Requirements
-
-- Go 1.24+ **or** Docker
-
-### Run locally
+**Requirements:** Go 1.24+ or Docker
 
 ```bash
+# Run locally
 make run
-```
 
-### Run with Docker
-
-```bash
-# Development — live source mount
+# Run with Docker (development — live source mount)
 make docker-dev
 
-# Production — optimised scratch image
+# Run with Docker (production — scratch image)
 make docker-prod
 ```
 
----
-
-## Connect
-
-Once the server is running, connect with `redis-cli` or `telnet`:
+The server listens on `0.0.0.0:6379` by default. Configuration is via flags:
 
 ```bash
-redis-cli -p 6379 PING
-# → PONG
-
-redis-cli -p 6379 SET hello world
-# → OK
-
-redis-cli -p 6379 GET hello
-# → "world"
-
-redis-cli -p 6379 DEL hello
-# → (integer) 1
-
-redis-cli -p 6379 KEYS "*"
-# → (empty array)
+./go-redis -port 6380 -aof-sync everysec -log-level debug
 ```
 
 ---
 
-## Development
+## Example Usage
 
 ```bash
-make build          # compile binary to ./bin/go-redis
-make run            # run with go run (no build step)
-make test           # run all tests
-make test-verbose   # run tests with verbose output
-make test-race      # run tests with race detector
-make test-cover     # generate HTML coverage report → coverage.html
-make fmt            # format source files
-make vet            # run go vet
-make lint           # run golangci-lint (must be installed separately)
-make tidy           # tidy go.mod and go.sum
-make docker-dev     # start dev server in Docker
-make docker-prod    # build and start production image
-make docker-down    # stop and remove containers
-make clean          # remove build artifacts
-make help           # list all targets
+# Strings and counters
+redis-cli SET user:42:name "Alice"
+redis-cli INCR user:42:logins          # (integer) 1
+redis-cli MSET a 1 b 2 c 3
+redis-cli MGET a b c                   # 1, 2, 3
+
+# Key expiration
+redis-cli SETEX session:token 300 "user:42"
+redis-cli TTL session:token            # (integer) 300
+redis-cli PERSIST session:token        # removes TTL
+
+# Hashes
+redis-cli HSET habit:1 name "Exercise" goal 30 streak 0
+redis-cli HINCRBY habit:1 streak 1     # (integer) 1
+redis-cli HGETALL habit:1
+
+# Pub/Sub — exact channel (terminal 1)
+redis-cli SUBSCRIBE habits:updates
+
+# Pub/Sub — publish (terminal 2)
+redis-cli PUBLISH habits:updates "new-habit-added"   # (integer) 1
+
+# Pattern subscription
+redis-cli PSUBSCRIBE "habits:*"        # receives all habits:* channels
 ```
-
----
-
-## Documentation
-
-Step-by-step design and implementation notes live in [`docs/`](docs/).
-
-| Step | File | Content |
-|------|------|---------|
-| 01 | [01-project-scope.md](docs/01-project-scope.md) | What Redis is, scope, learning objectives |
-| 02 | [02-architecture.md](docs/02-architecture.md) | System architecture, data flow, dependency graph |
-| 03 | [03-project-structure.md](docs/03-project-structure.md) | Repository layout and dependency rules |
-| 04 | [04-dev-environment.md](docs/04-dev-environment.md) | Docker, Makefile, local setup |
-| 05 | [05-resp-protocol.md](docs/05-resp-protocol.md) | RESP v2 wire format, parser, serializer |
-| 06 | [06-tcp-server.md](docs/06-tcp-server.md) | TCP listener, goroutine-per-connection model |
-| 07 | [07-command-handler.md](docs/07-command-handler.md) | Command router, handler functions |
-| 08 | [08-storage.md](docs/08-storage.md) | In-memory store, RWMutex concurrency |
-| 09 | [09-persistence-aof.md](docs/09-persistence-aof.md) | AOF write path, fsync policies, replay |
-| 10 | [10-request-flow.md](docs/10-request-flow.md) | End-to-end request walkthrough with diagrams |
-| 11 | [11-testing.md](docs/11-testing.md) | Integration tests, test patterns |
 
 ---
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    CLIENT(["redis-cli"])
+flowchart TB
+    CLIENT(["redis-cli / app"])
 
-    subgraph NET["Network Layer"]
-        TCP["TCP Server\nserver.go"]
-        CONN["Connection Handler\nhandler.go"]
+    subgraph NET["Network Layer  (internal/server)"]
+        TCP["TCP Server\nserver.go\naccept loop · graceful shutdown"]
+        CONN["Connection Handler\nhandler.go\ngoroutine per client"]
     end
 
-    subgraph PROTO["Protocol Layer"]
-        PARSER["RESP Parser\nparser.go"]
+    subgraph PROTO["Protocol Layer  (internal/protocol)"]
+        PARSER["RESP Parser\nparser.go\nbinary-safe · incremental"]
         SERIAL["RESP Serializer\nserializer.go"]
     end
 
-    subgraph CMD["Command Layer"]
-        ROUTER["Command Router\nrouter.go"]
+    subgraph CMD["Command Layer  (internal/commands)"]
+        ROUTER["Command Router\nrouter.go\nregistry · AOF transform"]
+        CMDS["Handlers\nstring · expire · counter\nhash · server_cmds"]
     end
 
     subgraph DATA["Data & Persistence"]
-        STORE["MemoryStore\nmemory.go"]
-        AOF["AOF Writer\naof.go"]
+        STORE["MemoryStore\nstrings + hashes · expiry · RWMutex"]
+        CLEANUP["Expiry Cleaner\n1 s background sweep"]
+        AOF["AOF Writer\nappendonly.aof"]
+        REPLAY["AOF Replay\nstartup restore"]
+    end
+
+    subgraph PUBSUB["Pub/Sub"]
+        BROKER["Broker\nexact + pattern subscriptions"]
+        SUB["Subscriber\nbuffered inbox · done signal"]
     end
 
     CLIENT -->|"RESP request"| TCP
     TCP --> CONN
     CONN --> PARSER
-    CONN --> ROUTER
+    PARSER -->|"[]string args"| ROUTER
+    ROUTER --> CMDS
+    CMDS --> STORE
+    ROUTER -->|"AOF append"| AOF
+    ROUTER -->|"PUBLISH"| BROKER
+    BROKER --> SUB
+    SUB -->|"push frames"| CONN
     CONN --> SERIAL
-    ROUTER --> STORE
-    ROUTER --> AOF
     SERIAL -->|"RESP response"| CLIENT
+    STORE --- CLEANUP
+    AOF -.->|"startup"| REPLAY
+    REPLAY -.->|"restore"| STORE
 ```
 
-See [02-architecture.md](docs/02-architecture.md) for the full layered diagram and dependency graph.
+Each client connection runs in its own goroutine. The handler intercepts
+`SUBSCRIBE` and `PSUBSCRIBE` before the router so it can manage
+per-connection subscription state and a dedicated write-loop goroutine.
+
+---
+
+## Habit-Buddy Use Cases
+
+| Use case | Commands |
+|----------|----------|
+| Store habit metadata | `HSET habit:<id> name <n> goal <g> streak 0` |
+| Increment daily streak | `HINCRBY habit:<id> streak 1` |
+| Session tokens with TTL | `SETEX session:<token> 3600 <user_id>` |
+| Rate limiting | `INCR ratelimit:<ip>` + `EXPIRE ratelimit:<ip> 60` |
+| Realtime notifications | `PUBLISH habits:updates <payload>` |
+| Listen to all habit events | `PSUBSCRIBE "habits:*"` |
+| Daily completion counters | `INCR daily:completions:<date>` |
+
+---
+
+## Development
+
+```bash
+make build          # compile binary to ./go-redis
+make run            # run with go run
+make test           # run all tests
+make test-race      # run tests with race detector (recommended)
+make test-cover     # generate HTML coverage report
+make fmt            # gofmt all source files
+make vet            # run go vet
+make lint           # run golangci-lint (must be installed)
+make tidy           # go mod tidy
+make docker-dev     # start development container
+make docker-prod    # build and run production image
+make docker-down    # stop containers
+make clean          # remove build artifacts
+```
+
+---
+
+## Documentation
+
+Step-by-step design notes covering each subsystem:
+
+| # | File | Topic |
+|---|------|-------|
+| 01 | [01-project-scope.md](docs/01-project-scope.md) | Scope and learning objectives |
+| 02 | [02-architecture.md](docs/02-architecture.md) | System architecture and data flow |
+| 03 | [03-project-structure.md](docs/03-project-structure.md) | Repository layout |
+| 04 | [04-dev-environment.md](docs/04-dev-environment.md) | Docker, Makefile, local setup |
+| 05 | [05-resp-protocol.md](docs/05-resp-protocol.md) | RESP v2 wire format |
+| 06 | [06-tcp-server.md](docs/06-tcp-server.md) | TCP listener and goroutine model |
+| 07 | [07-command-handler.md](docs/07-command-handler.md) | Command router and AOF transforms |
+| 08 | [08-storage.md](docs/08-storage.md) | In-memory store, expiry, hash type |
+| 09 | [09-persistence-aof.md](docs/09-persistence-aof.md) | AOF write path and replay |
+| 10 | [10-request-flow.md](docs/10-request-flow.md) | End-to-end request walkthrough |
+| 11 | [11-testing.md](docs/11-testing.md) | Testing strategy |
+| — | [pubsub.md](docs/pubsub.md) | Pub/Sub design (SUBSCRIBE + PSUBSCRIBE) |
+
+---
+
+## Limitations
+
+This project implements a Redis-compatible subset, not a full Redis replacement.
+
+| Feature | Status |
+|--------|--------|
+| List, Set, Sorted Set types | Not implemented |
+| Transactions (`MULTI` / `EXEC` / `WATCH`) | Not implemented |
+| RDB snapshot persistence | Not implemented |
+| AOF rewrite / compaction | Not implemented |
+| Replication and clustering | Single-node only |
+| AUTH / ACL | Not implemented |
+| Lua scripting | Not implemented |
+| Memory eviction policies | Not implemented (`maxmemory`, LRU, LFU) |
+| Pub/Sub delivery | Best-effort only; messages dropped when subscriber inbox (256) is full |
+| Expiration accuracy | Background sweep runs every 1 second |
+| KEYS command | Full keyspace scan (O(N)) |
+| Multiple databases (`SELECT n`) | `SELECT 0` only |
+| Durability guarantees | Depends on AOF fsync policy (`everysec` may lose up to ~1s of data) |

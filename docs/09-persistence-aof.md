@@ -65,22 +65,58 @@ type Appender interface {
 
 ## What Gets Logged
 
-Only **mutating** commands that **succeed**:
+Only **mutating** commands that **succeed**. The router's `appendToAOF` method handles
+two concerns: (1) which commands write to the AOF, and (2) **what form** they are written in.
 
-```go
-var mutatingCommands = map[string]bool{
-    "SET": true,
-    "DEL": true,
-}
+### Direct records (logged verbatim)
 
-// In Dispatch — after successful execution:
-if r.aof != nil && mutatingCommands[name] && resp.Type != protocol.TypeError {
-    _ = r.aof.Append(args)
-}
+| Command | AOF record |
+|---------|------------|
+| `SET key value` | `SET key value` |
+| `DEL key [key ...]` | `DEL key [key ...]` |
+| `MSET k v [k v ...]` | `MSET k v [k v ...]` |
+| `HSET key f v [f v ...]` | `HSET key f v [f v ...]` |
+| `HDEL key field [field ...]` | `HDEL key field [field ...]` |
+| `FLUSHDB` / `FLUSHALL` | as-is |
+| `PERSIST key` | `PERSIST key` |
+
+### Transformed records
+
+Some commands carry **relative time** or need the **final computed value**. Storing them
+verbatim would produce incorrect state on replay. Instead:
+
+| Command | AOF records written |
+|---------|---------------------|
+| `SETEX key 10 value` | `SET key value` + `PEXPIREAT key <abs_ms>` |
+| `PSETEX key 5000 value` | `SET key value` + `PEXPIREAT key <abs_ms>` |
+| `EXPIRE key 30` | `PEXPIREAT key <abs_ms>` |
+| `PEXPIRE key 5000` | `PEXPIREAT key <abs_ms>` |
+| `SETNX key value` (set) | `SET key value` |
+| `GETSET key value` | `SET key value` |
+| `GETDEL key` (existed) | `DEL key` |
+| `INCR key` → new value N | `SET key N` |
+| `INCRBY key delta` → N | `SET key N` |
+| `DECR key` → N | `SET key N` |
+| `DECRBY key delta` → N | `SET key N` |
+| `HINCRBY key field delta` → N | `HSET key field N` |
+| `RENAME src dst` | `SET dst value` (or `HSET dst …`) + `DEL src` |
+
+### Why `PEXPIREAT`?
+
+`EXPIRE key 30` is relative to the moment it was executed. If the server restarts
+after 20 seconds, on replay we would wrongly apply another 30 seconds. By converting
+to `PEXPIREAT key <unix_ms>` (absolute timestamp), replay can compute the exact
+remaining TTL:
+
+```
+remaining = abs_ms - now_ms
+if remaining > 0: store.Expire(key, remaining)
+else:             store.Del(key)   // already expired
 ```
 
-`GET`, `PING`, `EXISTS`, `KEYS` are never written — they don't change state.
-Failed commands (TypeError responses) are never written — they must not be replayed.
+Read-only commands (`GET`, `PING`, `EXISTS`, `KEYS`, …) are never written.
+Failed commands (`TypeError` responses) are never written.
+
 
 ---
 
@@ -114,14 +150,21 @@ flowchart TD
     A([Server starts]) --> B["store.Flush() — clean slate"]
     B --> C["Open AOF for reading"]
     C --> D{ReadCommand}
-    D -->|SET| E["store.Set(key, value)"]
-    D -->|DEL| F["store.Del(keys...)"]
+    D -->|SET/MSET/DEL| E["store.Set / store.Del"]
+    D -->|HSET/HDEL| F["store.HSet / store.HDel"]
+    D -->|PEXPIREAT| P["compute remaining TTL\nExpire or Del"]
+    D -->|PERSIST| Q["store.Persist"]
+    D -->|FLUSHDB| R["store.Flush"]
     D -->|EOF| G["Log: replay complete\ncommands=N, keys=M"]
     E --> D
     F --> D
+    P --> D
+    Q --> D
+    R --> D
     G --> H["persistence.Open for appending"]
-    H --> I["server.Run — accept clients"]
-    I --> J([Ready])
+    H --> I["store.StartCleanup(ctx)"]
+    I --> J["server.Run — accept clients"]
+    J --> K([Ready])
 ```
 
 Replay bypasses the Router — no further AOF writes, no import cycle.

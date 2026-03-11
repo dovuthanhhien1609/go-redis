@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ── Basic correctness tests ───────────────────────────────────────────────────
@@ -294,6 +295,244 @@ func TestMemoryStore_ConcurrentFlush(t *testing.T) {
 	v, ok := s.Get("post-flush")
 	if !ok || v != "ok" {
 		t.Error("store should be usable after concurrent Flush")
+	}
+}
+
+// ── Expiry tests ──────────────────────────────────────────────────────────────
+
+func TestMemoryStore_SetWithTTL_Expires(t *testing.T) {
+	s := NewMemoryStore()
+	s.SetWithTTL("k", "v", 50*time.Millisecond)
+	if _, ok := s.Get("k"); !ok {
+		t.Fatal("key should exist immediately after SetWithTTL")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, ok := s.Get("k"); ok {
+		t.Error("key should have expired")
+	}
+}
+
+func TestMemoryStore_Expire_SetAndGet(t *testing.T) {
+	s := NewMemoryStore()
+	s.Set("k", "v")
+	ok := s.Expire("k", 100*time.Millisecond)
+	if !ok {
+		t.Fatal("Expire should return true for existing key")
+	}
+	time.Sleep(150 * time.Millisecond)
+	if _, ok := s.Get("k"); ok {
+		t.Error("key should have expired after TTL")
+	}
+}
+
+func TestMemoryStore_Expire_MissingKey(t *testing.T) {
+	s := NewMemoryStore()
+	if s.Expire("nope", time.Second) {
+		t.Error("Expire should return false for missing key")
+	}
+}
+
+func TestMemoryStore_TTL_NoExpiry(t *testing.T) {
+	s := NewMemoryStore()
+	s.Set("k", "v")
+	d := s.TTL("k")
+	if d != -1*time.Second {
+		t.Errorf("TTL for key without expiry should be -1s, got %v", d)
+	}
+}
+
+func TestMemoryStore_TTL_WithExpiry(t *testing.T) {
+	s := NewMemoryStore()
+	s.SetWithTTL("k", "v", 10*time.Second)
+	d := s.TTL("k")
+	if d <= 0 || d > 10*time.Second {
+		t.Errorf("TTL should be in (0, 10s], got %v", d)
+	}
+}
+
+func TestMemoryStore_TTL_Missing(t *testing.T) {
+	s := NewMemoryStore()
+	d := s.TTL("nope")
+	if d != -2*time.Second {
+		t.Errorf("TTL for missing key should be -2s, got %v", d)
+	}
+}
+
+func TestMemoryStore_Persist(t *testing.T) {
+	s := NewMemoryStore()
+	s.SetWithTTL("k", "v", 10*time.Second)
+	if !s.Persist("k") {
+		t.Fatal("Persist should return true when TTL was removed")
+	}
+	if d := s.TTL("k"); d != -1*time.Second {
+		t.Errorf("after Persist TTL should be -1s, got %v", d)
+	}
+}
+
+func TestMemoryStore_Persist_NoTTL(t *testing.T) {
+	s := NewMemoryStore()
+	s.Set("k", "v")
+	if s.Persist("k") {
+		t.Error("Persist should return false when key has no TTL")
+	}
+}
+
+func TestMemoryStore_ExpiredKeys_NotInKeys(t *testing.T) {
+	s := NewMemoryStore()
+	s.SetWithTTL("expired", "v", 10*time.Millisecond)
+	s.Set("alive", "v")
+	time.Sleep(50 * time.Millisecond)
+	keys := s.Keys("*")
+	for _, k := range keys {
+		if k == "expired" {
+			t.Error("expired key should not appear in KEYS")
+		}
+	}
+}
+
+func TestMemoryStore_ExpiredKeys_NotInLen(t *testing.T) {
+	s := NewMemoryStore()
+	s.SetWithTTL("expired", "v", 10*time.Millisecond)
+	s.Set("alive", "v")
+	time.Sleep(50 * time.Millisecond)
+	if n := s.Len(); n != 1 {
+		t.Errorf("Len should be 1 after expiry, got %d", n)
+	}
+}
+
+// ── Hash tests ────────────────────────────────────────────────────────────────
+
+func TestMemoryStore_HSet_HGet(t *testing.T) {
+	s := NewMemoryStore()
+	added := s.HSet("user:1", map[string]string{"name": "alice", "age": "30"})
+	if added != 2 {
+		t.Errorf("HSet added: got %d, want 2", added)
+	}
+	v, ok := s.HGet("user:1", "name")
+	if !ok || v != "alice" {
+		t.Errorf("HGet name: got (%q, %v)", v, ok)
+	}
+}
+
+func TestMemoryStore_HGet_Missing(t *testing.T) {
+	s := NewMemoryStore()
+	_, ok := s.HGet("nope", "field")
+	if ok {
+		t.Error("HGet on missing key should return false")
+	}
+}
+
+func TestMemoryStore_HDel(t *testing.T) {
+	s := NewMemoryStore()
+	s.HSet("h", map[string]string{"a": "1", "b": "2"})
+	n := s.HDel("h", "a")
+	if n != 1 {
+		t.Errorf("HDel count: got %d, want 1", n)
+	}
+	if _, ok := s.HGet("h", "a"); ok {
+		t.Error("field 'a' should have been deleted")
+	}
+}
+
+func TestMemoryStore_HGetAll(t *testing.T) {
+	s := NewMemoryStore()
+	s.HSet("h", map[string]string{"a": "1", "b": "2"})
+	all := s.HGetAll("h")
+	if len(all) != 2 {
+		t.Errorf("HGetAll len: got %d, want 2", len(all))
+	}
+}
+
+func TestMemoryStore_HLen(t *testing.T) {
+	s := NewMemoryStore()
+	s.HSet("h", map[string]string{"x": "1", "y": "2", "z": "3"})
+	if n := s.HLen("h"); n != 3 {
+		t.Errorf("HLen: got %d, want 3", n)
+	}
+}
+
+func TestMemoryStore_HExists(t *testing.T) {
+	s := NewMemoryStore()
+	s.HSet("h", map[string]string{"f": "v"})
+	if !s.HExists("h", "f") {
+		t.Error("HExists should be true for existing field")
+	}
+	if s.HExists("h", "missing") {
+		t.Error("HExists should be false for missing field")
+	}
+}
+
+func TestMemoryStore_HKeys_HVals(t *testing.T) {
+	s := NewMemoryStore()
+	s.HSet("h", map[string]string{"a": "1", "b": "2"})
+	if len(s.HKeys("h")) != 2 {
+		t.Error("HKeys should return 2 keys")
+	}
+	if len(s.HVals("h")) != 2 {
+		t.Error("HVals should return 2 values")
+	}
+}
+
+// ── Type introspection tests ───────────────────────────────────────────────────
+
+func TestMemoryStore_Type_String(t *testing.T) {
+	s := NewMemoryStore()
+	s.Set("k", "v")
+	if typ := s.Type("k"); typ != "string" {
+		t.Errorf("Type: got %q, want %q", typ, "string")
+	}
+}
+
+func TestMemoryStore_Type_Hash(t *testing.T) {
+	s := NewMemoryStore()
+	s.HSet("h", map[string]string{"f": "v"})
+	if typ := s.Type("h"); typ != "hash" {
+		t.Errorf("Type: got %q, want %q", typ, "hash")
+	}
+}
+
+func TestMemoryStore_Type_None(t *testing.T) {
+	s := NewMemoryStore()
+	if typ := s.Type("nope"); typ != "none" {
+		t.Errorf("Type: got %q, want %q", typ, "none")
+	}
+}
+
+// ── Rename tests ──────────────────────────────────────────────────────────────
+
+func TestMemoryStore_Rename_String(t *testing.T) {
+	s := NewMemoryStore()
+	s.Set("src", "hello")
+	if !s.Rename("src", "dst") {
+		t.Fatal("Rename should return true for existing key")
+	}
+	if _, ok := s.Get("src"); ok {
+		t.Error("src should not exist after rename")
+	}
+	v, ok := s.Get("dst")
+	if !ok || v != "hello" {
+		t.Errorf("dst should have value 'hello', got %q", v)
+	}
+}
+
+func TestMemoryStore_Rename_Hash(t *testing.T) {
+	s := NewMemoryStore()
+	s.HSet("src", map[string]string{"f": "v"})
+	if !s.Rename("src", "dst") {
+		t.Fatal("Rename hash should return true")
+	}
+	if s.Type("src") != "none" {
+		t.Error("src should not exist after rename")
+	}
+	if s.Type("dst") != "hash" {
+		t.Error("dst should be a hash after rename")
+	}
+}
+
+func TestMemoryStore_Rename_Missing(t *testing.T) {
+	s := NewMemoryStore()
+	if s.Rename("nope", "dst") {
+		t.Error("Rename should return false for missing key")
 	}
 }
 

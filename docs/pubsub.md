@@ -8,13 +8,15 @@ This document covers the design, data structures, concurrency model, and integra
 
 Pub/Sub (publish/subscribe) is a messaging pattern where publishers send messages to named **channels** without knowing who is listening, and subscribers receive messages on channels they have registered interest in. Publishers and subscribers are fully decoupled.
 
-go-redis implements the same three commands and the same RESP wire format as Redis:
+go-redis implements the Redis pub/sub command set including pattern subscriptions:
 
 | Command | Description |
 |---------|-------------|
 | `SUBSCRIBE <channel> [channel ...]` | Enter subscription mode and listen on one or more channels |
 | `UNSUBSCRIBE [channel ...]` | Unsubscribe from specific channels, or all channels if none given |
-| `PUBLISH <channel> <message>` | Send a message to all subscribers on a channel; returns subscriber count |
+| `PSUBSCRIBE <pattern> [pattern ...]` | Subscribe to channels matching a glob pattern |
+| `PUNSUBSCRIBE [pattern ...]` | Unsubscribe from specific patterns, or all patterns if none given |
+| `PUBLISH <channel> <message>` | Send a message to all subscribers; returns total receiver count |
 
 Key properties:
 - **Fire and forget** — messages are not persisted; if no subscriber is online, the message is dropped.
@@ -65,13 +67,16 @@ internal/server/
 ```go
 type Broker struct {
     mu       sync.RWMutex
-    channels map[string]map[*Subscriber]struct{}
+    channels map[string]map[*Subscriber]struct{} // exact-channel subscriptions
+    patterns map[string]map[*Subscriber]struct{} // glob-pattern subscriptions
 }
 ```
 
-- `channels` maps a channel name to the **set** of subscribers currently listening.
-- A set (map to empty struct) is used instead of a slice so that Subscribe and Unsubscribe are O(1).
-- `sync.RWMutex` allows concurrent reads (multiple publishers) while serialising writes (subscribe/unsubscribe events).
+- `channels` maps a channel name to the **set** of subscribers currently listening (SUBSCRIBE).
+- `patterns` maps a glob pattern to the **set** of subscribers (PSUBSCRIBE).
+- A set (map to empty struct) is used instead of a slice so Subscribe/Unsubscribe are O(1).
+- `sync.RWMutex` allows concurrent reads (multiple publishers) while serialising writes.
+- Pattern matching uses `filepath.Match` — the same semantics as KEYS (`*`, `?`, `[ranges]`).
 
 ### Subscriber
 
@@ -275,13 +280,47 @@ type Publisher interface {
 
 ---
 
+## PSUBSCRIBE — Pattern Subscriptions
+
+A client can subscribe to a glob pattern instead of (or in addition to) an exact channel name:
+
+```bash
+PSUBSCRIBE "habits:*"      # receives messages on any habits:xxx channel
+PSUBSCRIBE "user:?:events" # single-char wildcard
+```
+
+When a `PUBLISH habits:daily-reminder "check in"` arrives:
+1. Broker delivers a **`message`** frame to all exact subscribers of `habits:daily-reminder`.
+2. Broker delivers a **`pmessage`** frame to all pattern subscribers whose pattern matches.
+
+### pmessage wire format
+
+Pattern subscribers receive a 4-element array instead of the 3-element `message` array:
+
+```
+*4\r\n
+$8\r\npmessage\r\n
+$<len>\r\n<pattern>\r\n     ← the matched pattern (e.g. "habits:*")
+$<len>\r\n<channel>\r\n     ← the actual channel (e.g. "habits:daily-reminder")
+$<len>\r\n<payload>\r\n     ← the message payload
+```
+
+The extra `pattern` field lets the client know which `PSUBSCRIBE` triggered the delivery.
+
+### Subscription count ACKs
+
+ACKs for PSUBSCRIBE/PUNSUBSCRIBE include the **total** number of active subscriptions
+(exact channels + patterns combined), matching Redis behaviour.
+
+---
+
 ## Limitations vs Real Redis
 
 | Feature | go-redis | Redis |
 |---------|----------|-------|
 | SUBSCRIBE / UNSUBSCRIBE | ✓ | ✓ |
+| PSUBSCRIBE / PUNSUBSCRIBE | ✓ | ✓ |
 | PUBLISH | ✓ | ✓ |
-| Pattern subscriptions (PSUBSCRIBE) | ✗ | ✓ |
 | Message persistence | ✗ | ✗ (same) |
 | Cluster fan-out | ✗ | ✓ |
 | Slow subscriber backpressure | Drop messages | Drop messages |

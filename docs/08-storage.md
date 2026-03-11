@@ -64,19 +64,87 @@ heavy parallel read/write pressure is ~2–3×, still well within sub-microsecon
 
 ---
 
+## Multi-Type Storage
+
+The `MemoryStore` holds two separate maps — one for strings, one for hashes — sharing
+a single key namespace and a single `RWMutex`:
+
+```go
+type MemoryStore struct {
+    mu      sync.RWMutex
+    strings map[string]strEntry              // string values + per-entry expiry
+    hashes  map[string]map[string]string     // hash values
+    hashExp map[string]time.Time             // per-key expiry for hashes
+}
+
+type strEntry struct {
+    value     string
+    expiresAt time.Time // zero means "no expiry"
+}
+```
+
+A key name can refer to at most one type. Setting a string key automatically removes
+any hash at the same name, and vice versa (matches Redis semantics).
+
+---
+
+## Key Expiration
+
+### Lazy deletion (on every read)
+
+Every `Get`, `Exists`, `HGet`, etc. checks the `expiresAt` field before returning a value.
+An expired entry is treated as if it does not exist, even if the background sweeper
+has not yet collected it.
+
+### Active deletion (background goroutine)
+
+`store.StartCleanup(ctx)` launches a goroutine that calls `deleteExpired()` once per
+second. It acquires a write lock, iterates both maps, and deletes any entry whose
+`expiresAt` is in the past. The goroutine exits when `ctx` is cancelled (server shutdown).
+
+```go
+// main.go — after context creation
+store.StartCleanup(ctx)
+```
+
+This dual strategy (lazy + active) matches Redis's own approach: expired keys are
+invisible immediately on read, and memory is reclaimed by the background sweep within
+1 second.
+
+---
+
 ## `Flush()` Design Note
 
 ```go
 func (s *MemoryStore) Flush() {
     s.mu.Lock()
     defer s.mu.Unlock()
-    s.data = make(map[string]string)  // O(1), not O(n)
+    s.strings = make(map[string]strEntry)
+    s.hashes  = make(map[string]map[string]string)
+    s.hashExp = make(map[string]time.Time)
 }
 ```
 
-Replacing the map pointer is O(1) regardless of key count, releases all existing
+Replacing the map pointers is O(1) regardless of key count, releases all existing
 bucket memory to the GC immediately, and holds the write lock for the minimum
-possible time. Iterating and deleting would be O(n) and hold the lock the entire time.
+possible time.
+
+---
+
+## `Rename()` — Atomic Cross-Type Move
+
+`Rename(src, dst)` takes the write lock for the full operation so no other goroutine
+can observe a half-moved state:
+
+```go
+func (s *MemoryStore) Rename(src, dst string) bool {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    // copy src (string or hash) to dst, then delete src
+}
+```
+
+The TTL of `src` is preserved at `dst`.
 
 ---
 
@@ -84,13 +152,36 @@ possible time. Iterating and deleting would be O(n) and hold the lock the entire
 
 ```go
 type Store interface {
+    // Strings
     Set(key, value string)
+    SetWithTTL(key, value string, ttl time.Duration)
     Get(key string) (string, bool)
     Del(keys ...string) int
     Exists(keys ...string) int
     Keys(pattern string) []string
     Len() int
     Flush()
+
+    // Expiry
+    Expire(key string, ttl time.Duration) bool
+    TTL(key string) time.Duration  // -1s = no TTL, -2s = not found
+    Persist(key string) bool
+
+    // Atomic rename
+    Rename(src, dst string) bool
+
+    // Hashes
+    HSet(key string, fields map[string]string) int
+    HGet(key, field string) (string, bool)
+    HDel(key string, fields ...string) int
+    HGetAll(key string) map[string]string
+    HLen(key string) int
+    HExists(key, field string) bool
+    HKeys(key string) []string
+    HVals(key string) []string
+
+    // Type introspection
+    Type(key string) string  // "string" | "hash" | "none"
 }
 ```
 
@@ -104,8 +195,8 @@ outside of `main.go` and the storage package itself.
 | File | Responsibility |
 |---|---|
 | `internal/storage/store.go` | `Store` interface |
-| `internal/storage/memory.go` | `MemoryStore` — `RWMutex` + `map[string]string` |
-| `internal/storage/memory_test.go` | 20 tests: correctness + 5 concurrency + 5 benchmarks |
+| `internal/storage/memory.go` | `MemoryStore` — strings + hashes + expiry + rename |
+| `internal/storage/memory_test.go` | 45+ tests: correctness, expiry, hashes, rename, concurrency, benchmarks |
 
 ## Running Tests
 

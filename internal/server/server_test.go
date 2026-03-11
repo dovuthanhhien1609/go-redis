@@ -32,8 +32,8 @@ func newTestServer(t *testing.T) (addr string, cancel func()) {
 	cfg := &config.Config{MaxClients: 0}
 	log := logger.New("error") // silence logs during tests
 	store := storage.NewMemoryStore()
-	router := commands.NewRouter(store, nil) // AOF disabled
-	srv := New(cfg, log, router)
+	router := commands.NewRouter(store, nil, nil) // AOF and pub/sub disabled
+	srv := New(cfg, log, router, nil)
 
 	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -298,8 +298,8 @@ func TestServer_MaxClients(t *testing.T) {
 
 	cfg := &config.Config{MaxClients: 1}
 	log := logger.New("error")
-	router := commands.NewRouter(storage.NewMemoryStore(), nil)
-	srv := New(cfg, log, router)
+	router := commands.NewRouter(storage.NewMemoryStore(), nil, nil)
+	srv := New(cfg, log, router, nil)
 
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()

@@ -14,6 +14,7 @@ import (
 	"github.com/hiendvt/go-redis/internal/config"
 	"github.com/hiendvt/go-redis/internal/logger"
 	"github.com/hiendvt/go-redis/internal/persistence"
+	"github.com/hiendvt/go-redis/internal/pubsub"
 	"github.com/hiendvt/go-redis/internal/server"
 	"github.com/hiendvt/go-redis/internal/storage"
 )
@@ -34,11 +35,14 @@ func main() {
 		aof = setupAOF(cfg, log, store)
 	}
 
-	// 5. Build the command router.
-	router := commands.NewRouter(store, aof)
+	// 5. Create the pub/sub broker (shared across all connections).
+	broker := pubsub.NewBroker()
 
-	// 6. Create the TCP server.
-	srv := server.New(cfg, log, router)
+	// 6. Build the command router.
+	router := commands.NewRouter(store, aof, broker)
+
+	// 7. Create the TCP server.
+	srv := server.New(cfg, log, router, broker)
 
 	// Set up a context that is cancelled on SIGINT / SIGTERM so the server
 	// can shut down gracefully.

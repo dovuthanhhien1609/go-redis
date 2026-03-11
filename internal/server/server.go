@@ -11,6 +11,7 @@ import (
 
 	"github.com/hiendvt/go-redis/internal/commands"
 	"github.com/hiendvt/go-redis/internal/config"
+	"github.com/hiendvt/go-redis/internal/pubsub"
 )
 
 // Server wraps a TCP listener and manages the lifecycle of client connections.
@@ -18,6 +19,7 @@ type Server struct {
 	cfg    *config.Config
 	log    *slog.Logger
 	router *commands.Router
+	broker *pubsub.Broker // nil when pub/sub is not configured
 
 	// wg tracks active connection handler goroutines so Serve can wait
 	// for them to finish on shutdown.
@@ -35,11 +37,13 @@ type Server struct {
 }
 
 // New creates a Server. It does not start listening yet — call Run or Serve.
-func New(cfg *config.Config, log *slog.Logger, router *commands.Router) *Server {
+// Pass a non-nil broker to enable SUBSCRIBE/UNSUBSCRIBE handling per connection.
+func New(cfg *config.Config, log *slog.Logger, router *commands.Router, broker *pubsub.Broker) *Server {
 	return &Server{
 		cfg:    cfg,
 		log:    log,
 		router: router,
+		broker: broker,
 		conns:  make(map[net.Conn]struct{}),
 	}
 }
@@ -117,7 +121,7 @@ func (s *Server) acceptLoop(ln net.Listener) {
 			defer s.untrackConn(c)
 
 			s.log.Debug("client connected", "remote", c.RemoteAddr())
-			newHandler(c, s.router, s.log).serve()
+			newHandler(c, s.router, s.broker, s.log).serve()
 			s.log.Debug("client disconnected", "remote", c.RemoteAddr())
 		}(conn)
 	}

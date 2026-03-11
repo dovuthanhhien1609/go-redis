@@ -267,7 +267,7 @@ func TestKeys_NoArgs(t *testing.T) {
 
 func TestRouter_Dispatch_CaseInsensitive(t *testing.T) {
 	store := storage.NewMemoryStore()
-	router := NewRouter(store, nil)
+	router := NewRouter(store, nil, nil)
 
 	cases := [][]string{
 		{"ping"}, {"Ping"}, {"PING"}, {"pInG"},
@@ -279,26 +279,26 @@ func TestRouter_Dispatch_CaseInsensitive(t *testing.T) {
 }
 
 func TestRouter_Dispatch_UnknownCommand(t *testing.T) {
-	router := NewRouter(storage.NewMemoryStore(), nil)
+	router := NewRouter(storage.NewMemoryStore(), nil, nil)
 	r := router.Dispatch([]string{"NOTACOMMAND"})
 	assertError(t, r)
 }
 
 func TestRouter_Dispatch_EmptyArgs(t *testing.T) {
-	router := NewRouter(storage.NewMemoryStore(), nil)
+	router := NewRouter(storage.NewMemoryStore(), nil, nil)
 	r := router.Dispatch([]string{})
 	assertError(t, r)
 }
 
 func TestRouter_Dispatch_SetThenGet(t *testing.T) {
-	router := NewRouter(storage.NewMemoryStore(), nil)
+	router := NewRouter(storage.NewMemoryStore(), nil, nil)
 	router.Dispatch([]string{"SET", "name", "alice"})
 	r := router.Dispatch([]string{"GET", "name"})
 	assertBulkString(t, r, "alice")
 }
 
 func TestRouter_Dispatch_COMMAND(t *testing.T) {
-	router := NewRouter(storage.NewMemoryStore(), nil)
+	router := NewRouter(storage.NewMemoryStore(), nil, nil)
 	r := router.Dispatch([]string{"COMMAND"})
 	// Should return an array (possibly empty) — not an error.
 	assertArrayLen(t, r, 0)

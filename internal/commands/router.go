@@ -26,22 +26,25 @@ var mutatingCommands = map[string]bool{
 	"DEL": true,
 }
 
-// Router holds the command registry, the shared storage backend, and an
-// optional AOF appender for persistence.
+// Router holds the command registry, the shared storage backend, an optional
+// AOF appender for persistence, and an optional pub/sub publisher.
 // It is safe for concurrent use — Dispatch is read-only on the registry map,
 // and the store handles its own synchronization.
 type Router struct {
 	store    storage.Store
-	aof      Appender // nil when AOF is disabled
+	aof      Appender  // nil when AOF is disabled
+	pub      Publisher // nil when pub/sub is not wired up
 	handlers map[string]HandlerFunc
 }
 
 // NewRouter creates a Router with the given store and registers all built-in
 // command handlers. Pass a non-nil Appender to enable AOF persistence.
-func NewRouter(store storage.Store, aof Appender) *Router {
+// Pass a non-nil Publisher to enable the PUBLISH command.
+func NewRouter(store storage.Store, aof Appender, pub Publisher) *Router {
 	r := &Router{
 		store:    store,
 		aof:      aof,
+		pub:      pub,
 		handlers: make(map[string]HandlerFunc),
 	}
 	r.register()
@@ -58,6 +61,7 @@ func (r *Router) register() {
 	r.handlers["EXISTS"] = handleExists
 	r.handlers["KEYS"] = handleKeys
 	r.handlers["COMMAND"] = handleCommand
+	r.handlers["PUBLISH"] = makePublishHandler(r.pub)
 }
 
 // Dispatch normalizes the command name, looks it up in the registry, calls

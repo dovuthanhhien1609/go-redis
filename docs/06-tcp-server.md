@@ -54,26 +54,25 @@ Neither file knows about RESP encoding or command semantics.
 
 ## Connection Lifecycle
 
-```
-net.Listener.Accept()
-    │
-    ▼
-goroutine spawned
-    │
-    ▼
-handler.serve()
-    │
-    ├── loop:
-    │     parser.ReadCommand()   ← blocks until bytes arrive
-    │     router.Dispatch(args)
-    │     conn.Write(response)
-    │
-    └── client disconnects (io.EOF) or fatal error
-          │
-          ▼
-        conn.Close()
-        wg.Done()
-        goroutine exits
+```mermaid
+flowchart TB
+    Accept["net.Listener.Accept()"]
+    Goroutine["goroutine spawned"]
+    Serve["handler.serve()"]
+    Read["parser.ReadCommand()\nblocks until bytes arrive"]
+    Dispatch["router.Dispatch(args)"]
+    Write["conn.Write(response)"]
+    Disconnect{"client disconnects\nio.EOF or error"}
+    Cleanup["conn.Close()\nwg.Done()\ngoroutine exits"]
+
+    Accept --> Goroutine
+    Goroutine --> Serve
+    Serve --> Read
+    Read --> Dispatch
+    Dispatch --> Write
+    Write --> Disconnect
+    Disconnect -->|"continue"| Read
+    Disconnect -->|"disconnect"| Cleanup
 ```
 
 ---

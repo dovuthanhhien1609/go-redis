@@ -30,17 +30,24 @@ Key properties:
 
 ### Where Pub/Sub Lives
 
-```
-cmd/server/main.go
-      │
-      ├─ pubsub.NewBroker()          ← shared across all connections
-      ├─ commands.NewRouter(..., broker)
-      └─ server.New(..., broker)
-                │
-                └─ handler (per connection)
-                      ├─ router.Dispatch()   ← handles PUBLISH
-                      ├─ handleSubscribe()   ← SUBSCRIBE intercepted before router
-                      └─ handleUnsubscribe() ← UNSUBSCRIBE intercepted before router
+```mermaid
+flowchart TB
+    Main["cmd/server/main.go"]
+    Broker["pubsub.NewBroker()\nshared across all connections"]
+    Router["commands.NewRouter(..., broker)"]
+    Server["server.New(..., broker)"]
+    Handler["handler\n(per connection)"]
+    Dispatch["router.Dispatch()\nhandles PUBLISH"]
+    Sub["handleSubscribe()\nSUBSCRIBE intercepted\nbefore router"]
+    Unsub["handleUnsubscribe()\nUNSUBSCRIBE intercepted\nbefore router"]
+
+    Main --> Broker
+    Main --> Router
+    Main --> Server
+    Server --> Handler
+    Handler --> Dispatch
+    Handler --> Sub
+    Handler --> Unsub
 ```
 
 The **Broker** is a singleton created at startup and injected into both the command router (for PUBLISH) and each per-connection handler (for SUBSCRIBE/UNSUBSCRIBE).
@@ -156,17 +163,22 @@ The write loop goroutine exits when `sub.Done()` fires (triggered by `sub.Close(
 
 ### Goroutine lifecycle guarantee
 
-```
-serve() starts
-  │
-  ├─ client sends SUBSCRIBE
-  │     └─ go h.writeLoop()  ← started once, exits via done signal
-  │
-  ├─ client disconnects (io.EOF) or read error
-  │
-  └─ defer cleanupSubscriptions()
-        ├─ broker.UnsubscribeAll(sub)   ← no new Publishes will reach sub
-        └─ sub.Close()                  ← signals writeLoop to drain and exit
+```mermaid
+flowchart TB
+    Serve["serve() starts"]
+    Subscribe["client sends SUBSCRIBE"]
+    WriteLoop["go h.writeLoop()\nstarted once, exits via done signal"]
+    Disconnect["client disconnects\nio.EOF or read error"]
+    Cleanup["defer cleanupSubscriptions()"]
+    Unsub["broker.UnsubscribeAll(sub)\nno new Publishes will reach sub"]
+    Close["sub.Close()\nsignals writeLoop to drain and exit"]
+
+    Serve --> Subscribe
+    Subscribe --> WriteLoop
+    Serve --> Disconnect
+    Disconnect --> Cleanup
+    Cleanup --> Unsub
+    Cleanup --> Close
 ```
 
 No goroutine leaks. The write loop always terminates because `sub.Close()` always runs via `defer`.
@@ -177,57 +189,67 @@ No goroutine leaks. The write loop always terminates because `sub.Close()` alway
 
 ### SUBSCRIBE
 
-```
-Client → SUBSCRIBE news sports
-         │
-         handler.handleSubscribe(["news", "sports"])
-         │
-         broker.Subscribe("news", sub)      → channels["news"][sub] = {}
-         sub.Send(EncodeSubscribeAck("news", 1))
-         │
-         broker.Subscribe("sports", sub)    → channels["sports"][sub] = {}
-         sub.Send(EncodeSubscribeAck("sports", 2))
-         │
-         writeLoop reads inbox, writes to TCP
-         │
-Client ← *3\r\n$9\r\nsubscribe\r\n$4\r\nnews\r\n:1\r\n
-Client ← *3\r\n$9\r\nsubscribe\r\n$6\r\nsports\r\n:2\r\n
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Handler
+    participant Broker
+    participant WriteLoop
+
+    Client->>Handler: SUBSCRIBE news sports
+    Handler->>Broker: Subscribe("news", sub)
+    Note right of Broker: channels["news"][sub] = {}
+    Broker-->>Handler: ok
+    Handler->>WriteLoop: Send(EncodeSubscribeAck("news", 1))
+    Handler->>Broker: Subscribe("sports", sub)
+    Note right of Broker: channels["sports"][sub] = {}
+    Broker-->>Handler: ok
+    Handler->>WriteLoop: Send(EncodeSubscribeAck("sports", 2))
+    WriteLoop-->>Client: subscribe · news · :1
+    WriteLoop-->>Client: subscribe · sports · :2
 ```
 
 ### PUBLISH
 
-```
-Publisher → PUBLISH news "headline"
-            │
-            router.Dispatch → makePublishHandler → broker.Publish("news", "headline")
-            │
-            broker: snapshot = [sub1, sub2, sub3]
-            │
-            sub1.Send(EncodePubSubMessage("news", "headline"))  → inbox
-            sub2.Send(...)                                      → inbox
-            sub3.Send(...)                                      → inbox (dropped if full)
-            │
-            return count of successful sends
-            │
-Publisher ← :3\r\n
+```mermaid
+sequenceDiagram
+    participant Publisher
+    participant Router
+    participant Broker
+    participant Sub1
+    participant Sub2
+    participant Sub3
 
-(each subscriber's write loop)
-            read from inbox
-            │
-Subscriber ← *3\r\n$7\r\nmessage\r\n$4\r\nnews\r\n$8\r\nheadline\r\n
+    Publisher->>Router: PUBLISH news "headline"
+    Router->>Broker: broker.Publish("news", "headline")
+    Note right of Broker: snapshot = [sub1, sub2, sub3]
+    Broker->>Sub1: Send(message · news · headline) → inbox
+    Broker->>Sub2: Send(...) → inbox
+    Broker->>Sub3: Send(...) → inbox (dropped if full)
+    Broker-->>Router: 3 (receivers)
+    Router-->>Publisher: :3
+
+    Note over Sub1,Sub3: each subscriber's write loop reads inbox
+    Sub1-->>Publisher: message · news · headline
+    Sub2-->>Publisher: message · news · headline
+    Sub3-->>Publisher: message · news · headline
 ```
 
 ### UNSUBSCRIBE
 
-```
-Client → UNSUBSCRIBE news
-         │
-         handler.handleUnsubscribe(["news"])
-         │
-         broker.Unsubscribe("news", sub)
-         sub.Send(EncodeUnsubscribeAck("news", 1))  ← remaining subscriptions
-         │
-Client ← *3\r\n$11\r\nunsubscribe\r\n$4\r\nnews\r\n:1\r\n
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Handler
+    participant Broker
+    participant WriteLoop
+
+    Client->>Handler: UNSUBSCRIBE news
+    Handler->>Broker: Unsubscribe("news", sub)
+    Broker-->>Handler: ok
+    Handler->>WriteLoop: Send(EncodeUnsubscribeAck("news", 1))
+    Note right of WriteLoop: remaining subscriptions = 1
+    WriteLoop-->>Client: unsubscribe · news · :1
 ```
 
 ---

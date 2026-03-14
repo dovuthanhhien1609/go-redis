@@ -97,11 +97,15 @@ for a single client.
 - Handle client disconnection (EOF) and protocol errors
 
 **Lifecycle**:
-```
-accept → spawn goroutine → read loop → parse → dispatch → write → loop
-                                                                      ↓
-                                                                  client disconnects
-                                                                  goroutine exits
+```mermaid
+flowchart LR
+    Accept["Accept\nnet.Conn"] --> Goroutine["Spawn\ngoroutine"]
+    Goroutine --> ReadLoop["Read loop\nparser.ReadCommand()"]
+    ReadLoop --> Parse["Parse\nRESP → args"]
+    Parse --> Dispatch["Dispatch\nrouter.Dispatch(args)"]
+    Dispatch --> Write["Write\nconn.Write(response)"]
+    Write --> ReadLoop
+    Write -->|"client disconnects"| Exit["goroutine exits"]
 ```
 
 ---

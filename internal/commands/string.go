@@ -3,19 +3,103 @@ package commands
 import (
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hiendvt/go-redis/internal/protocol"
 	"github.com/hiendvt/go-redis/internal/storage"
 )
 
-// handleSet implements SET key value.
-// Phase 1: no options (EX, PX, NX, XX). Returns +OK on success.
+// handleSet implements SET key value [NX|XX] [GET]
+// [EX seconds | PX milliseconds | EXAT unix-time-seconds | PXAT unix-time-milliseconds | KEEPTTL].
 func handleSet(args []string, store storage.Store) protocol.Response {
-	if len(args) != 3 {
-		return protocol.Error("ERR wrong number of arguments for 'SET'")
+	if len(args) < 3 {
+		return protocol.Error("ERR wrong number of arguments for 'SET' command")
 	}
-	store.Set(args[1], args[2])
+	key, value := args[1], args[2]
+	var opts storage.SetAdvOpts
+	var ttl time.Duration
+
+	for i := 3; i < len(args); i++ {
+		switch strings.ToUpper(args[i]) {
+		case "NX":
+			opts.NX = true
+		case "XX":
+			opts.XX = true
+		case "GET":
+			opts.Get = true
+		case "KEEPTTL":
+			opts.KeepTTL = true
+		case "EX":
+			i++
+			if i >= len(args) {
+				return protocol.Error("ERR syntax error")
+			}
+			secs, err := strconv.ParseInt(args[i], 10, 64)
+			if err != nil || secs <= 0 {
+				return protocol.Error("ERR invalid expire time in 'SET' command")
+			}
+			ttl = time.Duration(secs) * time.Second
+		case "PX":
+			i++
+			if i >= len(args) {
+				return protocol.Error("ERR syntax error")
+			}
+			ms, err := strconv.ParseInt(args[i], 10, 64)
+			if err != nil || ms <= 0 {
+				return protocol.Error("ERR invalid expire time in 'SET' command")
+			}
+			ttl = time.Duration(ms) * time.Millisecond
+		case "EXAT":
+			i++
+			if i >= len(args) {
+				return protocol.Error("ERR syntax error")
+			}
+			unixSec, err := strconv.ParseInt(args[i], 10, 64)
+			if err != nil || unixSec <= 0 {
+				return protocol.Error("ERR invalid expire time in 'SET' command")
+			}
+			ttl = time.Until(time.Unix(unixSec, 0))
+			if ttl <= 0 {
+				ttl = 1 // immediate but non-zero to trigger expiry path
+			}
+		case "PXAT":
+			i++
+			if i >= len(args) {
+				return protocol.Error("ERR syntax error")
+			}
+			unixMs, err := strconv.ParseInt(args[i], 10, 64)
+			if err != nil || unixMs <= 0 {
+				return protocol.Error("ERR invalid expire time in 'SET' command")
+			}
+			ttl = time.Until(time.UnixMilli(unixMs))
+			if ttl <= 0 {
+				ttl = 1
+			}
+		default:
+			return protocol.Error("ERR syntax error")
+		}
+	}
+
+	if opts.NX && opts.XX {
+		return protocol.Error("ERR syntax error")
+	}
+
+	oldVal, oldExists, wasSet := store.SetAdv(key, value, ttl, opts)
+
+	if opts.Get {
+		if !wasSet && opts.NX {
+			// NX+GET: return current value even though we didn't set
+		}
+		if !oldExists {
+			return protocol.NullBulkString()
+		}
+		return protocol.BulkString(oldVal)
+	}
+
+	if !wasSet {
+		return protocol.NullBulkString()
+	}
 	return protocol.SimpleString("OK")
 }
 
@@ -169,6 +253,75 @@ func handleGetDel(args []string, store storage.Store) protocol.Response {
 		return protocol.NullBulkString()
 	}
 	store.Del(args[1])
+	return protocol.BulkString(val)
+}
+
+// handleGetEX implements GETEX key [EX seconds | PX milliseconds | EXAT ts | PXAT ts | PERSIST].
+func handleGetEX(args []string, store storage.Store) protocol.Response {
+	if len(args) < 2 {
+		return protocol.Error("ERR wrong number of arguments for 'GETEX' command")
+	}
+	key := args[1]
+	var ttl time.Duration
+	var persist, hasTTL bool
+
+	for i := 2; i < len(args); i++ {
+		switch strings.ToUpper(args[i]) {
+		case "PERSIST":
+			persist = true
+		case "EX":
+			i++
+			if i >= len(args) {
+				return protocol.Error("ERR syntax error")
+			}
+			secs, err := strconv.ParseInt(args[i], 10, 64)
+			if err != nil || secs <= 0 {
+				return protocol.Error("ERR invalid expire time in 'GETEX' command")
+			}
+			ttl = time.Duration(secs) * time.Second
+			hasTTL = true
+		case "PX":
+			i++
+			if i >= len(args) {
+				return protocol.Error("ERR syntax error")
+			}
+			ms, err := strconv.ParseInt(args[i], 10, 64)
+			if err != nil || ms <= 0 {
+				return protocol.Error("ERR invalid expire time in 'GETEX' command")
+			}
+			ttl = time.Duration(ms) * time.Millisecond
+			hasTTL = true
+		case "EXAT":
+			i++
+			if i >= len(args) {
+				return protocol.Error("ERR syntax error")
+			}
+			unixSec, err := strconv.ParseInt(args[i], 10, 64)
+			if err != nil || unixSec <= 0 {
+				return protocol.Error("ERR invalid expire time in 'GETEX' command")
+			}
+			ttl = time.Until(time.Unix(unixSec, 0))
+			hasTTL = true
+		case "PXAT":
+			i++
+			if i >= len(args) {
+				return protocol.Error("ERR syntax error")
+			}
+			unixMs, err := strconv.ParseInt(args[i], 10, 64)
+			if err != nil || unixMs <= 0 {
+				return protocol.Error("ERR invalid expire time in 'GETEX' command")
+			}
+			ttl = time.Until(time.UnixMilli(unixMs))
+			hasTTL = true
+		default:
+			return protocol.Error("ERR syntax error")
+		}
+	}
+
+	val, ok := store.GetEx(key, ttl, persist, hasTTL)
+	if !ok {
+		return protocol.NullBulkString()
+	}
 	return protocol.BulkString(val)
 }
 

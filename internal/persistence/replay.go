@@ -139,6 +139,259 @@ func applyCommand(args []string, store storage.Store) error {
 		}
 		store.HDel(args[1], args[2:]...)
 
+	// ── List commands ────────────────────────────────────────────────────
+	case "LPUSH":
+		if len(args) < 3 {
+			return fmt.Errorf("LPUSH requires key and at least one value")
+		}
+		store.LPush(args[1], args[2:]...) //nolint:errcheck
+
+	case "RPUSH":
+		if len(args) < 3 {
+			return fmt.Errorf("RPUSH requires key and at least one value")
+		}
+		store.RPush(args[1], args[2:]...) //nolint:errcheck
+
+	case "LPUSHX":
+		if len(args) < 3 {
+			return fmt.Errorf("LPUSHX requires key and at least one value")
+		}
+		if store.Type(args[1]) == "list" {
+			store.LPush(args[1], args[2:]...) //nolint:errcheck
+		}
+
+	case "RPUSHX":
+		if len(args) < 3 {
+			return fmt.Errorf("RPUSHX requires key and at least one value")
+		}
+		if store.Type(args[1]) == "list" {
+			store.RPush(args[1], args[2:]...) //nolint:errcheck
+		}
+
+	case "LPOP":
+		if len(args) < 2 {
+			return fmt.Errorf("LPOP requires at least key")
+		}
+		count := 1
+		if len(args) == 3 {
+			if n, err := strconv.Atoi(args[2]); err == nil {
+				count = n
+			}
+		}
+		store.LPop(args[1], count) //nolint:errcheck
+
+	case "RPOP":
+		if len(args) < 2 {
+			return fmt.Errorf("RPOP requires at least key")
+		}
+		count := 1
+		if len(args) == 3 {
+			if n, err := strconv.Atoi(args[2]); err == nil {
+				count = n
+			}
+		}
+		store.RPop(args[1], count) //nolint:errcheck
+
+	case "LSET":
+		if len(args) != 4 {
+			return fmt.Errorf("LSET requires key index value")
+		}
+		idx, err := strconv.Atoi(args[2])
+		if err != nil {
+			return fmt.Errorf("LSET: invalid index: %w", err)
+		}
+		store.LSet(args[1], idx, args[3]) //nolint:errcheck
+
+	case "LINSERT":
+		if len(args) != 5 {
+			return fmt.Errorf("LINSERT requires key BEFORE|AFTER pivot value")
+		}
+		before := strings.ToUpper(args[2]) == "BEFORE"
+		store.LInsert(args[1], before, args[3], args[4]) //nolint:errcheck
+
+	case "LTRIM":
+		if len(args) != 4 {
+			return fmt.Errorf("LTRIM requires key start stop")
+		}
+		start, e1 := strconv.Atoi(args[2])
+		stop, e2 := strconv.Atoi(args[3])
+		if e1 != nil || e2 != nil {
+			return fmt.Errorf("LTRIM: invalid range")
+		}
+		store.LTrim(args[1], start, stop) //nolint:errcheck
+
+	case "LREM":
+		if len(args) != 4 {
+			return fmt.Errorf("LREM requires key count value")
+		}
+		count, err := strconv.Atoi(args[2])
+		if err != nil {
+			return fmt.Errorf("LREM: invalid count: %w", err)
+		}
+		store.LRem(args[1], count, args[3]) //nolint:errcheck
+
+	case "LMOVE":
+		if len(args) != 5 {
+			return fmt.Errorf("LMOVE requires src dst srcDir dstDir")
+		}
+		srcLeft := strings.ToUpper(args[3]) == "LEFT"
+		dstLeft := strings.ToUpper(args[4]) == "LEFT"
+		store.LMove(args[1], args[2], srcLeft, dstLeft) //nolint:errcheck
+
+	case "RPOPLPUSH":
+		if len(args) != 3 {
+			return fmt.Errorf("RPOPLPUSH requires src dst")
+		}
+		store.LMove(args[1], args[2], false, true) //nolint:errcheck
+
+	// ── Set commands ─────────────────────────────────────────────────────
+	case "SADD":
+		if len(args) < 3 {
+			return fmt.Errorf("SADD requires key and at least one member")
+		}
+		store.SAdd(args[1], args[2:]...) //nolint:errcheck
+
+	case "SREM":
+		if len(args) < 3 {
+			return fmt.Errorf("SREM requires key and at least one member")
+		}
+		store.SRem(args[1], args[2:]...) //nolint:errcheck
+
+	case "SINTERSTORE":
+		if len(args) < 3 {
+			return fmt.Errorf("SINTERSTORE requires dst and at least one key")
+		}
+		store.SInterStore(args[1], args[2:]...) //nolint:errcheck
+
+	case "SUNIONSTORE":
+		if len(args) < 3 {
+			return fmt.Errorf("SUNIONSTORE requires dst and at least one key")
+		}
+		store.SUnionStore(args[1], args[2:]...) //nolint:errcheck
+
+	case "SDIFFSTORE":
+		if len(args) < 3 {
+			return fmt.Errorf("SDIFFSTORE requires dst and at least one key")
+		}
+		store.SDiffStore(args[1], args[2:]...) //nolint:errcheck
+
+	case "SMOVE":
+		if len(args) != 4 {
+			return fmt.Errorf("SMOVE requires src dst member")
+		}
+		store.SMove(args[1], args[2], args[3]) //nolint:errcheck
+
+	case "SPOP":
+		if len(args) < 2 {
+			return fmt.Errorf("SPOP requires key")
+		}
+		count := 1
+		if len(args) == 3 {
+			if n, err := strconv.Atoi(args[2]); err == nil {
+				count = n
+			}
+		}
+		store.SPop(args[1], count) //nolint:errcheck
+
+	// ── Sorted set commands ──────────────────────────────────────────────
+	case "ZADD":
+		// ZADD key [NX|XX] [GT|LT] [CH] score member [score member ...]
+		if len(args) < 4 {
+			return fmt.Errorf("ZADD requires key and at least one score/member pair")
+		}
+		key := args[1]
+		var nx, xx, gt, lt, ch bool
+		i := 2
+		for ; i < len(args); i++ {
+			switch strings.ToUpper(args[i]) {
+			case "NX":
+				nx = true
+			case "XX":
+				xx = true
+			case "GT":
+				gt = true
+			case "LT":
+				lt = true
+			case "CH":
+				ch = true
+			default:
+				goto zaddMembers
+			}
+		}
+	zaddMembers:
+		if (len(args)-i)%2 != 0 {
+			return fmt.Errorf("ZADD: odd number of score/member arguments")
+		}
+		members := make([]storage.ZMember, 0, (len(args)-i)/2)
+		for j := i; j < len(args); j += 2 {
+			score, err := strconv.ParseFloat(args[j], 64)
+			if err != nil {
+				return fmt.Errorf("ZADD: invalid score %q: %w", args[j], err)
+			}
+			members = append(members, storage.ZMember{Score: score, Member: args[j+1]})
+		}
+		store.ZAdd(key, members, nx, xx, gt, lt, ch) //nolint:errcheck
+
+	case "ZREM":
+		if len(args) < 3 {
+			return fmt.Errorf("ZREM requires key and at least one member")
+		}
+		store.ZRem(args[1], args[2:]...) //nolint:errcheck
+
+	case "ZINCRBY":
+		if len(args) != 4 {
+			return fmt.Errorf("ZINCRBY requires key increment member")
+		}
+		incr, err := strconv.ParseFloat(args[2], 64)
+		if err != nil {
+			return fmt.Errorf("ZINCRBY: invalid increment: %w", err)
+		}
+		store.ZIncrBy(args[1], incr, args[3]) //nolint:errcheck
+
+	case "ZUNIONSTORE":
+		if len(args) < 4 {
+			return fmt.Errorf("ZUNIONSTORE requires dst numkeys key [key ...]")
+		}
+		numkeys, err := strconv.Atoi(args[2])
+		if err != nil || numkeys < 1 || len(args) < 3+numkeys {
+			return fmt.Errorf("ZUNIONSTORE: invalid arguments")
+		}
+		store.ZUnionStore(args[1], args[3:3+numkeys], nil, "SUM") //nolint:errcheck
+
+	case "ZINTERSTORE":
+		if len(args) < 4 {
+			return fmt.Errorf("ZINTERSTORE requires dst numkeys key [key ...]")
+		}
+		numkeys, err := strconv.Atoi(args[2])
+		if err != nil || numkeys < 1 || len(args) < 3+numkeys {
+			return fmt.Errorf("ZINTERSTORE: invalid arguments")
+		}
+		store.ZInterStore(args[1], args[3:3+numkeys], nil, "SUM") //nolint:errcheck
+
+	case "ZPOPMIN":
+		if len(args) < 2 {
+			return fmt.Errorf("ZPOPMIN requires key")
+		}
+		count := int64(1)
+		if len(args) == 3 {
+			if n, err := strconv.ParseInt(args[2], 10, 64); err == nil {
+				count = n
+			}
+		}
+		store.ZPopMin(args[1], count) //nolint:errcheck
+
+	case "ZPOPMAX":
+		if len(args) < 2 {
+			return fmt.Errorf("ZPOPMAX requires key")
+		}
+		count := int64(1)
+		if len(args) == 3 {
+			if n, err := strconv.ParseInt(args[2], 10, 64); err == nil {
+				count = n
+			}
+		}
+		store.ZPopMax(args[1], count) //nolint:errcheck
+
 	// ── Admin commands ───────────────────────────────────────────────────
 	case "FLUSHDB", "FLUSHALL":
 		store.Flush()

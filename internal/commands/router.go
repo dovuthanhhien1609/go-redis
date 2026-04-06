@@ -55,6 +55,7 @@ func (r *Router) register() {
 	// String
 	r.handlers["SET"] = handleSet
 	r.handlers["GET"] = handleGet
+	r.handlers["GETEX"] = handleGetEX
 	r.handlers["DEL"] = handleDel
 	r.handlers["EXISTS"] = handleExists
 	r.handlers["KEYS"] = handleKeys
@@ -71,6 +72,8 @@ func (r *Router) register() {
 	// Expiry
 	r.handlers["EXPIRE"] = handleExpire
 	r.handlers["PEXPIRE"] = handlePExpire
+	r.handlers["EXPIREAT"] = handleExpireAt
+	r.handlers["PEXPIREAT"] = handlePExpireAt
 	r.handlers["TTL"] = handleTTL
 	r.handlers["PTTL"] = handlePTTL
 	r.handlers["PERSIST"] = handlePersist
@@ -78,6 +81,7 @@ func (r *Router) register() {
 	// Counters
 	r.handlers["INCR"] = handleIncr
 	r.handlers["INCRBY"] = handleIncrBy
+	r.handlers["INCRBYFLOAT"] = handleIncrByFloat
 	r.handlers["DECR"] = handleDecr
 	r.handlers["DECRBY"] = handleDecrBy
 
@@ -93,6 +97,69 @@ func (r *Router) register() {
 	r.handlers["HKEYS"] = handleHKeys
 	r.handlers["HVALS"] = handleHVals
 	r.handlers["HINCRBY"] = handleHIncrBy
+	r.handlers["HINCRBYFLOAT"] = handleHIncrByFloat
+
+	// List
+	r.handlers["LPUSH"] = handleLPush
+	r.handlers["RPUSH"] = handleRPush
+	r.handlers["LPUSHX"] = handleLPushX
+	r.handlers["RPUSHX"] = handleRPushX
+	r.handlers["LPOP"] = handleLPop
+	r.handlers["RPOP"] = handleRPop
+	r.handlers["LLEN"] = handleLLen
+	r.handlers["LRANGE"] = handleLRange
+	r.handlers["LINDEX"] = handleLIndex
+	r.handlers["LSET"] = handleLSet
+	r.handlers["LINSERT"] = handleLInsert
+	r.handlers["LREM"] = handleLRem
+	r.handlers["LTRIM"] = handleLTrim
+	r.handlers["LMOVE"] = handleLMove
+	r.handlers["RPOPLPUSH"] = handleRPopLPush
+	r.handlers["LPOS"] = handleLPos
+
+	// Set
+	r.handlers["SADD"] = handleSAdd
+	r.handlers["SREM"] = handleSRem
+	r.handlers["SMEMBERS"] = handleSMembers
+	r.handlers["SCARD"] = handleSCard
+	r.handlers["SISMEMBER"] = handleSIsMember
+	r.handlers["SMISMEMBER"] = handleSMIsMember
+	r.handlers["SINTER"] = handleSInter
+	r.handlers["SUNION"] = handleSUnion
+	r.handlers["SDIFF"] = handleSDiff
+	r.handlers["SINTERSTORE"] = handleSInterStore
+	r.handlers["SUNIONSTORE"] = handleSUnionStore
+	r.handlers["SDIFFSTORE"] = handleSDiffStore
+	r.handlers["SRANDMEMBER"] = handleSRandMember
+	r.handlers["SPOP"] = handleSPop
+	r.handlers["SMOVE"] = handleSMove
+
+	// Sorted set
+	r.handlers["ZADD"] = handleZAdd
+	r.handlers["ZREM"] = handleZRem
+	r.handlers["ZSCORE"] = handleZScore
+	r.handlers["ZCARD"] = handleZCard
+	r.handlers["ZRANK"] = handleZRank
+	r.handlers["ZREVRANK"] = handleZRevRank
+	r.handlers["ZINCRBY"] = handleZIncrBy
+	r.handlers["ZRANGE"] = handleZRange
+	r.handlers["ZREVRANGE"] = handleZRevRange
+	r.handlers["ZRANGEBYSCORE"] = handleZRangeByScore
+	r.handlers["ZREVRANGEBYSCORE"] = handleZRevRangeByScore
+	r.handlers["ZRANGEBYLEX"] = handleZRangeByLex
+	r.handlers["ZREVRANGEBYLEX"] = handleZRevRangeByLex
+	r.handlers["ZCOUNT"] = handleZCount
+	r.handlers["ZLEXCOUNT"] = handleZLexCount
+	r.handlers["ZPOPMIN"] = handleZPopMin
+	r.handlers["ZPOPMAX"] = handleZPopMax
+	r.handlers["ZUNIONSTORE"] = handleZUnionStore
+	r.handlers["ZINTERSTORE"] = handleZInterStore
+
+	// Scan
+	r.handlers["SCAN"] = handleScan
+	r.handlers["HSCAN"] = handleHScan
+	r.handlers["SSCAN"] = handleSScan
+	r.handlers["ZSCAN"] = handleZScan
 
 	// Server / admin
 	r.handlers["INFO"] = handleInfo
@@ -102,10 +169,18 @@ func (r *Router) register() {
 	r.handlers["FLUSHDB"] = handleFlushDB
 	r.handlers["FLUSHALL"] = handleFlushAll
 	r.handlers["SELECT"] = handleSelect
+	r.handlers["OBJECT"] = handleObject
+	r.handlers["CLIENT"] = handleClient
 
 	// Pub/sub (PUBLISH only — SUBSCRIBE/UNSUBSCRIBE are handled by the server
 	// layer because they are connection-state-aware)
 	r.handlers["PUBLISH"] = makePublishHandler(r.pub)
+}
+
+// KeyVersion returns the current modification version of key from the store.
+// Used by the server handler to implement WATCH.
+func (r *Router) KeyVersion(key string) uint64 {
+	return r.store.Version(key)
 }
 
 // Dispatch normalises the command name, looks it up in the registry, calls
@@ -150,12 +225,16 @@ func (r *Router) appendToAOF(name string, args []string, resp protocol.Response)
 	switch name {
 	// ── Commands logged verbatim ─────────────────────────────────────────
 	case "SET", "DEL", "MSET", "HSET", "HMSET", "HDEL",
-		"FLUSHDB", "FLUSHALL", "PERSIST", "APPEND":
+		"FLUSHDB", "FLUSHALL", "PERSIST", "APPEND",
+		"LPUSH", "RPUSH", "LPUSHX", "RPUSHX",
+		"LSET", "LINSERT", "LTRIM",
+		"SADD", "SREM", "SINTERSTORE", "SUNIONSTORE", "SDIFFSTORE",
+		"SMOVE",
+		"ZADD", "ZREM", "ZINCRBY", "ZUNIONSTORE", "ZINTERSTORE":
 		_ = r.aof.Append(args)
 
 	// ── SET if not exists ────────────────────────────────────────────────
 	case "SETNX":
-		// Only append if the key was actually set (:1 response).
 		if resp.Integer == 1 {
 			_ = r.aof.Append([]string{"SET", args[1], args[2]})
 		}
@@ -165,14 +244,39 @@ func (r *Router) appendToAOF(name string, args []string, resp protocol.Response)
 		_ = r.aof.Append([]string{"SET", args[1], args[2]})
 
 	case "GETDEL":
-		// Only delete if the key existed (non-null response).
 		if resp.Type != protocol.TypeNullBulkString {
 			_ = r.aof.Append([]string{"DEL", args[1]})
 		}
 
+	// ── List pop/move ────────────────────────────────────────────────────
+	case "LPOP", "RPOP":
+		if resp.Type != protocol.TypeNullBulkString && resp.Type != protocol.TypeNullArray {
+			_ = r.aof.Append(args)
+		}
+
+	case "LMOVE", "RPOPLPUSH":
+		if resp.Type != protocol.TypeNullBulkString {
+			_ = r.aof.Append(args)
+		}
+
+	case "LREM":
+		if resp.Integer > 0 {
+			_ = r.aof.Append(args)
+		}
+
+	// ── Set pop ──────────────────────────────────────────────────────────
+	case "SPOP":
+		if resp.Type != protocol.TypeNullBulkString {
+			_ = r.aof.Append(args)
+		}
+
+	// ── ZSet pop ─────────────────────────────────────────────────────────
+	case "ZPOPMIN", "ZPOPMAX":
+		if len(resp.Array) > 0 {
+			_ = r.aof.Append(args)
+		}
+
 	// ── TTL-bearing set commands ─────────────────────────────────────────
-	// Logged as SET + PEXPIREAT so replay uses an absolute timestamp,
-	// preserving the correct remaining TTL across restarts.
 	case "SETEX":
 		if len(args) == 4 {
 			_ = r.aof.Append([]string{"SET", args[1], args[3]})
@@ -208,20 +312,37 @@ func (r *Router) appendToAOF(name string, args []string, resp protocol.Response)
 			}
 		}
 
+	case "EXPIREAT":
+		if resp.Integer == 1 && len(args) == 3 {
+			if secs, err := strconv.ParseInt(args[2], 10, 64); err == nil {
+				absMs := secs * 1000
+				_ = r.aof.Append([]string{"PEXPIREAT", args[1], strconv.FormatInt(absMs, 10)})
+			}
+		}
+
+	case "PEXPIREAT":
+		if resp.Integer == 1 && len(args) == 3 {
+			_ = r.aof.Append(args)
+		}
+
 	// ── Counter commands ─────────────────────────────────────────────────
-	// Logged as SET key <final_value> for idempotent replay.
 	case "INCR", "INCRBY", "DECR", "DECRBY":
 		_ = r.aof.Append([]string{"SET", args[1], strconv.FormatInt(resp.Integer, 10)})
 
+	case "INCRBYFLOAT":
+		_ = r.aof.Append([]string{"SET", args[1], resp.Str})
+
 	case "HINCRBY":
-		// Logged as HSET key field <final_value>.
 		if len(args) == 4 {
 			_ = r.aof.Append([]string{"HSET", args[1], args[2], strconv.FormatInt(resp.Integer, 10)})
 		}
 
+	case "HINCRBYFLOAT":
+		if len(args) == 4 {
+			_ = r.aof.Append([]string{"HSET", args[1], args[2], resp.Str})
+		}
+
 	// ── Rename ───────────────────────────────────────────────────────────
-	// After a successful rename, dst holds the value; we log DST write +
-	// SRC deletion so replay reconstructs the correct state.
 	case "RENAME":
 		if len(args) == 3 && args[1] != args[2] {
 			dst := args[2]

@@ -54,6 +54,28 @@ func handleIncrBy(args []string, store storage.Store) protocol.Response {
 	return incrBy(args[1], delta, store)
 }
 
+// handleIncrByFloat implements INCRBYFLOAT key increment.
+func handleIncrByFloat(args []string, store storage.Store) protocol.Response {
+	if len(args) != 3 {
+		return protocol.Error("ERR wrong number of arguments for 'INCRBYFLOAT' command")
+	}
+	delta, err := strconv.ParseFloat(args[2], 64)
+	if err != nil {
+		return protocol.Error("ERR value is not a valid float")
+	}
+	var current float64
+	if raw, ok := store.Get(args[1]); ok {
+		current, err = strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return protocol.Error("ERR value is not a valid float")
+		}
+	}
+	result := current + delta
+	resultStr := strconv.FormatFloat(result, 'f', -1, 64)
+	store.Set(args[1], resultStr)
+	return protocol.Response{Type: protocol.TypeBulkString, Str: resultStr}
+}
+
 // handleDecr implements DECR key.
 func handleDecr(args []string, store storage.Store) protocol.Response {
 	if len(args) != 2 {

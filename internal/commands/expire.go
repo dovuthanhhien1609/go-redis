@@ -82,6 +82,47 @@ func handlePTTL(args []string, store storage.Store) protocol.Response {
 	}
 }
 
+// handleExpireAt implements EXPIREAT key unix-time-seconds.
+func handleExpireAt(args []string, store storage.Store) protocol.Response {
+	if len(args) != 3 {
+		return protocol.Error("ERR wrong number of arguments for 'EXPIREAT' command")
+	}
+	unixSec, err := strconv.ParseInt(args[2], 10, 64)
+	if err != nil {
+		return protocol.Error("ERR value is not an integer or out of range")
+	}
+	remaining := time.Until(time.Unix(unixSec, 0))
+	if remaining <= 0 {
+		// Expire immediately.
+		store.Del(args[1])
+		return protocol.Integer(1)
+	}
+	if store.Expire(args[1], remaining) {
+		return protocol.Integer(1)
+	}
+	return protocol.Integer(0)
+}
+
+// handlePExpireAt implements PEXPIREAT key unix-time-milliseconds.
+func handlePExpireAt(args []string, store storage.Store) protocol.Response {
+	if len(args) != 3 {
+		return protocol.Error("ERR wrong number of arguments for 'PEXPIREAT' command")
+	}
+	unixMs, err := strconv.ParseInt(args[2], 10, 64)
+	if err != nil {
+		return protocol.Error("ERR value is not an integer or out of range")
+	}
+	remaining := time.Until(time.UnixMilli(unixMs))
+	if remaining <= 0 {
+		store.Del(args[1])
+		return protocol.Integer(1)
+	}
+	if store.Expire(args[1], remaining) {
+		return protocol.Integer(1)
+	}
+	return protocol.Integer(0)
+}
+
 // handlePersist implements PERSIST key.
 // Removes the TTL from key. Returns :1 if removed, :0 if key had no TTL.
 func handlePersist(args []string, store storage.Store) protocol.Response {

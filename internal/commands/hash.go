@@ -1,6 +1,8 @@
 package commands
 
 import (
+	"strconv"
+
 	"github.com/hiendvt/go-redis/internal/protocol"
 	"github.com/hiendvt/go-redis/internal/storage"
 )
@@ -126,6 +128,29 @@ func handleHVals(args []string, store storage.Store) protocol.Response {
 		elems[i] = protocol.BulkString(v)
 	}
 	return protocol.Array(elems)
+}
+
+// handleHIncrByFloat implements HINCRBYFLOAT key field increment.
+func handleHIncrByFloat(args []string, store storage.Store) protocol.Response {
+	if len(args) != 4 {
+		return protocol.Error("ERR wrong number of arguments for 'HINCRBYFLOAT' command")
+	}
+	key, field := args[1], args[2]
+	delta, err := strconv.ParseFloat(args[3], 64)
+	if err != nil {
+		return protocol.Error("ERR value is not a valid float")
+	}
+	var current float64
+	if raw, ok := store.HGet(key, field); ok {
+		current, err = strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return protocol.Error("ERR hash value is not a valid float")
+		}
+	}
+	result := current + delta
+	resultStr := strconv.FormatFloat(result, 'f', -1, 64)
+	store.HSet(key, map[string]string{field: resultStr})
+	return protocol.Response{Type: protocol.TypeBulkString, Str: resultStr}
 }
 
 // handleHIncrBy implements HINCRBY key field increment.

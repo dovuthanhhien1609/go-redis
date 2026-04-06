@@ -39,6 +39,19 @@ type handler struct {
 
 	// subPatterns tracks pattern subscriptions for this client.
 	subPatterns map[string]struct{}
+
+	// ── Transaction state ────────────────────────────────────────────────
+	// inMulti is true between MULTI and EXEC/DISCARD.
+	inMulti bool
+	// txQueue holds commands queued during MULTI.
+	txQueue [][]string
+	// txErrors counts commands queued with syntax errors during MULTI.
+	txErrors int
+
+	// ── WATCH state ──────────────────────────────────────────────────────
+	// watchedKeys maps key → version at the time of WATCH.
+	// If any key's version has changed by EXEC time, EXEC returns nil.
+	watchedKeys map[string]uint64
 }
 
 // newHandler constructs a handler for the given connection.
@@ -51,6 +64,7 @@ func newHandler(conn net.Conn, router *commands.Router, broker *pubsub.Broker, l
 		broker:      broker,
 		subChans:    make(map[string]struct{}),
 		subPatterns: make(map[string]struct{}),
+		watchedKeys: make(map[string]uint64),
 	}
 }
 
@@ -71,7 +85,9 @@ func (h *handler) serve() {
 			return
 		}
 
-		switch strings.ToUpper(args[0]) {
+		name := strings.ToUpper(args[0])
+
+		switch name {
 		case "SUBSCRIBE":
 			h.handleSubscribe(args[1:])
 		case "UNSUBSCRIBE":
@@ -80,6 +96,35 @@ func (h *handler) serve() {
 			h.handlePSubscribe(args[1:])
 		case "PUNSUBSCRIBE":
 			h.handlePUnsubscribe(args[1:])
+
+		// ── Transaction commands ─────────────────────────────────────────
+		case "MULTI":
+			if err := h.respond(protocol.Serialize(h.handleMulti())); err != nil {
+				h.log.Debug("write error", "remote", h.conn.RemoteAddr(), "err", err)
+				return
+			}
+		case "EXEC":
+			if err := h.respondMany(h.handleExec()); err != nil {
+				h.log.Debug("write error", "remote", h.conn.RemoteAddr(), "err", err)
+				return
+			}
+		case "DISCARD":
+			if err := h.respond(protocol.Serialize(h.handleDiscard())); err != nil {
+				h.log.Debug("write error", "remote", h.conn.RemoteAddr(), "err", err)
+				return
+			}
+		case "WATCH":
+			if err := h.respond(protocol.Serialize(h.handleWatch(args[1:]))); err != nil {
+				h.log.Debug("write error", "remote", h.conn.RemoteAddr(), "err", err)
+				return
+			}
+		case "UNWATCH":
+			h.watchedKeys = make(map[string]uint64)
+			if err := h.respond(protocol.Serialize(protocol.SimpleString("OK"))); err != nil {
+				h.log.Debug("write error", "remote", h.conn.RemoteAddr(), "err", err)
+				return
+			}
+
 		default:
 			// Once in subscription mode, only pub/sub management commands are
 			// allowed. This matches Redis 6+ behaviour.
@@ -88,6 +133,17 @@ func (h *handler) serve() {
 					"ERR Command not allowed in subscription mode")))
 				continue
 			}
+
+			// In MULTI mode: queue the command instead of executing it.
+			if h.inMulti {
+				h.txQueue = append(h.txQueue, args)
+				if err := h.respond(protocol.Serialize(protocol.SimpleString("QUEUED"))); err != nil {
+					h.log.Debug("write error", "remote", h.conn.RemoteAddr(), "err", err)
+					return
+				}
+				continue
+			}
+
 			resp := h.router.Dispatch(args)
 			if err := h.respond(protocol.Serialize(resp)); err != nil {
 				h.log.Debug("write error", "remote", h.conn.RemoteAddr(), "err", err)
@@ -95,6 +151,120 @@ func (h *handler) serve() {
 			}
 		}
 	}
+}
+
+// handleMulti processes the MULTI command.
+func (h *handler) handleMulti() protocol.Response {
+	if h.inMulti {
+		return protocol.Error("ERR MULTI calls can not be nested")
+	}
+	h.inMulti = true
+	h.txQueue = h.txQueue[:0]
+	h.txErrors = 0
+	return protocol.SimpleString("OK")
+}
+
+// handleExec processes the EXEC command, executing all queued commands.
+// Returns a slice of serialized responses (one per queued command).
+func (h *handler) handleExec() []string {
+	if !h.inMulti {
+		return []string{protocol.Serialize(protocol.Error("ERR EXEC without MULTI"))}
+	}
+
+	// Clean up transaction state on exit.
+	defer func() {
+		h.inMulti = false
+		h.txQueue = nil
+		h.txErrors = 0
+		h.watchedKeys = make(map[string]uint64)
+	}()
+
+	// If there were command errors during MULTI, abort.
+	if h.txErrors > 0 {
+		return []string{protocol.Serialize(protocol.Error("EXECABORT Transaction discarded because of previous errors."))}
+	}
+
+	// Check WATCH: if any watched key was modified, return null array.
+	if h.watchDirty() {
+		return []string{protocol.Serialize(protocol.Response{Type: protocol.TypeNullArray})}
+	}
+
+	// Execute all queued commands, collecting responses.
+	results := make([]string, len(h.txQueue))
+	for i, cmd := range h.txQueue {
+		resp := h.router.Dispatch(cmd)
+		results[i] = protocol.Serialize(resp)
+	}
+
+	// Wrap in array response.
+	var sb strings.Builder
+	sb.WriteString("*")
+	sb.WriteString(itoa(len(results)))
+	sb.WriteString("\r\n")
+	for _, r := range results {
+		sb.WriteString(r)
+	}
+	return []string{sb.String()}
+}
+
+// handleDiscard processes the DISCARD command.
+func (h *handler) handleDiscard() protocol.Response {
+	if !h.inMulti {
+		return protocol.Error("ERR DISCARD without MULTI")
+	}
+	h.inMulti = false
+	h.txQueue = nil
+	h.txErrors = 0
+	h.watchedKeys = make(map[string]uint64)
+	return protocol.SimpleString("OK")
+}
+
+// handleWatch processes the WATCH key [key ...] command.
+// Saves the current version of each key so EXEC can detect concurrent modifications.
+func (h *handler) handleWatch(keys []string) protocol.Response {
+	if h.inMulti {
+		return protocol.Error("ERR WATCH inside MULTI is not allowed")
+	}
+	if len(keys) == 0 {
+		return protocol.Error("ERR wrong number of arguments for 'watch' command")
+	}
+	for _, k := range keys {
+		h.watchedKeys[k] = h.router.KeyVersion(k)
+	}
+	return protocol.SimpleString("OK")
+}
+
+// watchDirty returns true if any watched key has been modified since WATCH.
+func (h *handler) watchDirty() bool {
+	for k, ver := range h.watchedKeys {
+		if h.router.KeyVersion(k) != ver {
+			return true
+		}
+	}
+	return false
+}
+
+// itoa converts an int to a string without importing strconv.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	buf := make([]byte, 20)
+	pos := len(buf)
+	for n > 0 {
+		pos--
+		buf[pos] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
 }
 
 // totalSubscriptions returns the total number of active exact-channel and
@@ -215,10 +385,6 @@ func (h *handler) handlePUnsubscribe(patterns []string) {
 // writeLoop reads pre-serialized RESP strings from the subscriber inbox and
 // writes them to the TCP connection. It is the sole writer to conn once a
 // client has subscribed, ensuring no concurrent writes.
-//
-// The loop exits when sub.Done() is closed (client disconnect) or when a
-// write to the connection fails. On shutdown it drains any messages already
-// queued in the inbox so subscription ACKs are not silently lost.
 func (h *handler) writeLoop() {
 	for {
 		select {
@@ -243,7 +409,6 @@ func (h *handler) writeLoop() {
 
 // cleanupSubscriptions removes the client from all broker channels and
 // patterns, then closes the subscriber, which signals the write loop to exit.
-// Called via defer in serve() so it always runs on disconnect.
 func (h *handler) cleanupSubscriptions() {
 	if h.sub == nil {
 		return
@@ -256,10 +421,6 @@ func (h *handler) cleanupSubscriptions() {
 }
 
 // respond writes a pre-serialized RESP string to the client.
-//
-// Before first SUBSCRIBE/PSUBSCRIBE: writes directly to conn (handler is sole writer).
-// After first SUBSCRIBE/PSUBSCRIBE:  queues in inbox for the write loop.
-// Returns nil in this case — the send is fire-and-forget.
 func (h *handler) respond(s string) error {
 	if h.sub != nil {
 		h.sub.Send(s)
@@ -267,4 +428,14 @@ func (h *handler) respond(s string) error {
 	}
 	_, err := io.WriteString(h.conn, s)
 	return err
+}
+
+// respondMany writes multiple pre-serialized RESP strings to the client.
+func (h *handler) respondMany(parts []string) error {
+	for _, p := range parts {
+		if err := h.respond(p); err != nil {
+			return err
+		}
+	}
+	return nil
 }

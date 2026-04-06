@@ -291,6 +291,120 @@ func (m *mockStore) Type(key string) string {
 	return "none"
 }
 
+// ── New interface methods added with lists/sets/zsets/scan/watch ──────────────
+
+func (m *mockStore) SetAdv(key, value string, ttl time.Duration, opts storage.SetAdvOpts) (string, bool, bool) {
+	oldVal, oldExists := m.data[key]
+	if m.isExpired(key) {
+		oldExists = false
+		oldVal = ""
+	}
+	if opts.NX && oldExists {
+		return oldVal, oldExists, false
+	}
+	if opts.XX && !oldExists {
+		return oldVal, oldExists, false
+	}
+	delete(m.hashes, key)
+	m.data[key] = value
+	if opts.KeepTTL {
+		// keep existing TTL unchanged
+	} else if ttl > 0 {
+		m.expires[key] = time.Now().Add(ttl)
+	} else {
+		delete(m.expires, key)
+	}
+	return oldVal, oldExists, true
+}
+
+func (m *mockStore) GetEx(key string, ttl time.Duration, persist, hasTTL bool) (string, bool) {
+	if m.isExpired(key) {
+		return "", false
+	}
+	v, ok := m.data[key]
+	if !ok {
+		return "", false
+	}
+	if persist {
+		delete(m.expires, key)
+	} else if hasTTL {
+		m.expires[key] = time.Now().Add(ttl)
+	}
+	return v, true
+}
+
+func (m *mockStore) Version(_ string) uint64                                { return 0 }
+func (m *mockStore) Scan(_ uint64, _ string, _ int) (uint64, []string)     { return 0, nil }
+func (m *mockStore) HScan(_ string, _ uint64, _ string, _ int) (uint64, []string, error) {
+	return 0, nil, nil
+}
+func (m *mockStore) SScan(_ string, _ uint64, _ string, _ int) (uint64, []string, error) {
+	return 0, nil, nil
+}
+func (m *mockStore) ZScan(_ string, _ uint64, _ string, _ int) (uint64, []string, error) {
+	return 0, nil, nil
+}
+
+// List stubs.
+func (m *mockStore) LPush(_ string, _ ...string) (int, error)                        { return 0, nil }
+func (m *mockStore) RPush(_ string, _ ...string) (int, error)                        { return 0, nil }
+func (m *mockStore) LPop(_ string, _ int) ([]string, error)                          { return nil, nil }
+func (m *mockStore) RPop(_ string, _ int) ([]string, error)                          { return nil, nil }
+func (m *mockStore) LLen(_ string) (int, error)                                      { return 0, nil }
+func (m *mockStore) LRange(_ string, _, _ int) ([]string, error)                     { return nil, nil }
+func (m *mockStore) LIndex(_ string, _ int) (string, bool, error)                    { return "", false, nil }
+func (m *mockStore) LSet(_ string, _ int, _ string) error                            { return nil }
+func (m *mockStore) LInsert(_ string, _ bool, _, _ string) (int, error)              { return 0, nil }
+func (m *mockStore) LRem(_ string, _ int, _ string) (int, error)                     { return 0, nil }
+func (m *mockStore) LTrim(_ string, _, _ int) error                                  { return nil }
+func (m *mockStore) LMove(_, _ string, _, _ bool) (string, bool, error)              { return "", false, nil }
+
+// Set stubs.
+func (m *mockStore) SAdd(_ string, _ ...string) (int, error)                         { return 0, nil }
+func (m *mockStore) SRem(_ string, _ ...string) (int, error)                         { return 0, nil }
+func (m *mockStore) SMembers(_ string) ([]string, error)                             { return nil, nil }
+func (m *mockStore) SCard(_ string) (int, error)                                     { return 0, nil }
+func (m *mockStore) SIsMember(_, _ string) (bool, error)                             { return false, nil }
+func (m *mockStore) SMIsMember(_ string, _ ...string) ([]int64, error)               { return nil, nil }
+func (m *mockStore) SInter(_ ...string) ([]string, error)                            { return nil, nil }
+func (m *mockStore) SUnion(_ ...string) ([]string, error)                            { return nil, nil }
+func (m *mockStore) SDiff(_ ...string) ([]string, error)                             { return nil, nil }
+func (m *mockStore) SInterStore(_ string, _ ...string) (int, error)                  { return 0, nil }
+func (m *mockStore) SUnionStore(_ string, _ ...string) (int, error)                  { return 0, nil }
+func (m *mockStore) SDiffStore(_ string, _ ...string) (int, error)                   { return 0, nil }
+func (m *mockStore) SRandMember(_ string, _ int) ([]string, error)                   { return nil, nil }
+func (m *mockStore) SPop(_ string, _ int) ([]string, error)                          { return nil, nil }
+func (m *mockStore) SMove(_, _, _ string) (bool, error)                              { return false, nil }
+
+// Sorted set stubs.
+func (m *mockStore) ZAdd(_ string, _ []storage.ZMember, _, _, _, _, _ bool) (int64, error) {
+	return 0, nil
+}
+func (m *mockStore) ZRem(_ string, _ ...string) (int64, error)                       { return 0, nil }
+func (m *mockStore) ZScore(_, _ string) (float64, bool, error)                       { return 0, false, nil }
+func (m *mockStore) ZCard(_ string) (int64, error)                                   { return 0, nil }
+func (m *mockStore) ZRank(_, _ string) (int64, bool, error)                          { return 0, false, nil }
+func (m *mockStore) ZRevRank(_, _ string) (int64, bool, error)                       { return 0, false, nil }
+func (m *mockStore) ZIncrBy(_ string, _ float64, _ string) (float64, error)          { return 0, nil }
+func (m *mockStore) ZRange(_ string, _, _ int64, _, _ bool) ([]string, error)        { return nil, nil }
+func (m *mockStore) ZRangeByScore(_ string, _, _ float64, _, _, _ bool, _, _ int64) ([]string, error) {
+	return nil, nil
+}
+func (m *mockStore) ZRevRangeByScore(_ string, _, _ float64, _, _, _ bool, _, _ int64) ([]string, error) {
+	return nil, nil
+}
+func (m *mockStore) ZCount(_ string, _, _ float64, _, _ bool) (int64, error)         { return 0, nil }
+func (m *mockStore) ZRangeByLex(_ string, _, _ string, _, _ int64) ([]string, error) { return nil, nil }
+func (m *mockStore) ZLexCount(_ string, _, _ string) (int64, error)                  { return 0, nil }
+func (m *mockStore) ZPopMin(_ string, _ int64) ([]storage.ZMember, error)            { return nil, nil }
+func (m *mockStore) ZPopMax(_ string, _ int64) ([]storage.ZMember, error)            { return nil, nil }
+func (m *mockStore) ZUnionStore(_ string, _ []string, _ []float64, _ string) (int64, error) {
+	return 0, nil
+}
+func (m *mockStore) ZInterStore(_ string, _ []string, _ []float64, _ string) (int64, error) {
+	return 0, nil
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func assertSimpleString(t *testing.T, r protocol.Response, want string) {
